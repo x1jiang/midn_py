@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+  <title>Admin - Users</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/users">Users</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Users</h1>
+      <table class="table" aria-labelledby="users-heading">
+        <caption id="users-heading">List of all users</caption>
+        <thead>
+          <tr>
+            <th scope="col">ID</th>
+            <th scope="col">Username</th>
+            <th scope="col">Email</th>
+            <th scope="col">Institution</th>
+            <th scope="col">Approved</th>
+            <th scope="col">Site ID</th>
+            <th scope="col">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td>{{ u.id }}</td>
+            <td>{{ u.username }}</td>
+            <td>{{ u.email }}</td>
+            <td>{{ u.institution }}</td>
+            <td>{{ 'Yes' if u.is_approved else 'No' }}</td>
+            <td>{{ u.site_id }}</td>
+            <td>
+              <form method="post" action="/gui/admin/users/{{ u.id }}/approve">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" aria-label="Approve user {{ u.username }}">Approve</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>

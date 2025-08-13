@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+  <title>Jobs</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h1>Jobs</h1>
+        <a href="/gui/jobs/create"><button>Add Job</button></a>
+      </div>
+      <table class="table" aria-labelledby="jobs-heading">
+        <caption id="jobs-heading">List of all jobs</caption>
+        <thead>
+          <tr>
+            <th scope="col">ID</th>
+            <th scope="col">Name</th>
+            <th scope="col">Algorithm</th>
+            <th scope="col">Description</th>
+            <th scope="col">Status</th>
+            <th scope="col">Participants</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for j in jobs %}
+          <tr>
+            <td>{{ j.id }}</td>
+            <td>{{ j.name }}</td>
+            <td>{{ j.algorithm }}</td>
+            <td>{{ j.description }}</td>
+            <td>{{ j.status }}</td>
+            <td>{{ (j.participants or []) | length }}</td>
+            <td>
+              <a href="/gui/jobs/{{ j.id }}/edit" class="button-link" aria-label="Edit job {{ j.name }}"><button>Edit</button></a>
+              <form method="post" action="/gui/jobs/{{ j.id }}/delete" style="display:inline" onsubmit="return confirm('Delete job {{ j.id }}?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="submit" value="Delete" aria-label="Delete job {{ j.name }}">
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>

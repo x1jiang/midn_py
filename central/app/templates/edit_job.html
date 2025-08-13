@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <title>Edit Job</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Edit Job {{ job.id }}</h1>
+      <form method="post">
+        <label>Algorithm:<br>
+          <input value="{{ job.algorithm }}" disabled>
+        </label><br>
+        <label>Name:<br><input name="name" value="{{ job.name }}"></label><br>
+        <label>Description:<br><input name="description" value="{{ job.description }}"></label><br>
+        <label>Participants (select approved sites):<br>
+          <select name="participants" multiple size="6" required>
+            {% for u in approved_users %}
+              <option value="{{ u.site_id }}" {% if u.site_id in job.participants %}selected{% endif %}>{{ u.username }} ({{ u.site_id }})</option>
+            {% endfor %}
+          </select>
+        </label><br>
+
+        {% if job.algorithm.upper() == 'SIMI' %}
+        <div class="section-simi">
+          <h3>SIMI Parameters</h3>
+          <label>Target Column Index (1-based):<br>
+            <input type="number" name="target_column_index" min="1" value="{{ job.parameters.get('target_column_index') }}">
+          </label><br>
+          <div class="checkbox-container">
+            <input type="checkbox" name="is_binary" id="edit_is_binary" value="true" {% if job.parameters.get('is_binary') %}checked{% endif %}>
+            <label for="edit_is_binary">Binary Target</label>
+          </div><br>
+        </div>
+        {% endif %}
+
+        {% if job.algorithm.upper() == 'SIMICE' %}
+        <div class="section-simice">
+          <h3>SIMICE Parameters</h3>
+          <label>Target Column Indexes (comma-separated 1-based):<br>
+            <input type="text" name="target_column_indexes" value="{{ (job.parameters.get('target_column_indexes') or []) | join(',') }}">
+          </label><br>
+          <label for="is_binary_list">Is Binary per column (comma-separated true/false):<br>
+            <input type="text" name="is_binary_list" id="is_binary_list" value="{{ (job.parameters.get('is_binary') or []) | map('string') | join(',') }}">
+          </label><br>
+          <label>Iter before first:<br>
+            <input type="number" name="iteration_before_first_imputation" min="0" value="{{ job.parameters.get('iteration_before_first_imputation') }}">
+          </label><br>
+          <label>Iter between:<br>
+            <input type="number" name="iteration_between_imputations" min="0" value="{{ job.parameters.get('iteration_between_imputations') }}">
+          </label><br>
+        </div>
+        {% endif %}
+
+        <label>Number of Imputation Trials:<br><input type="number" name="imputation_trials" value="{{ job.imputation_trials or 10 }}" min="1"></label><br>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Save</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "sites": [
+    {
+      "name": "remote1",
+      "CENTRAL_URL": "ws://127.0.0.1:8000",
+      "HTTP_URL": "http://127.0.0.1:8000",
+      "SITE_ID": "224bdbc5",
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMjRiZGJjNSIsImV4cCI6MTc1NzY4Nzg3OX0.vdW5NDgBBKTvRk945Ixg19P34X6D_-AQtBNcEsdycHs"
+    },
+    {
+      "name": "remote2",
+      "CENTRAL_URL": "ws://127.0.0.1:8000",
+      "HTTP_URL": "http://127.0.0.1:8000",
+      "SITE_ID": "863a2efd",
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4NjNhMmVmZCIsImV4cCI6MTc1NzY4Nzg4NH0.Uxv-62JIpgr95a9WKL0TU3wxvce_Em42zjUU7qWizfs"
+    }
+  ]
+}

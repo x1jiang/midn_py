@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Remote Site</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js"></script>
+    <style>
+        .form-info {
+            color: #64748b;
+            font-size: 0.9em;
+            margin-top: 4px;
+            font-style: italic;
+        }
+        .btn-primary {
+            background: #0ea5e9;
+            color: white;
+            font-weight: bold;
+            padding: 10px 16px;
+            font-size: 1em;
+            border-radius: 6px;
+            cursor: pointer;
+            border: none;
+        }
+        select, input[type="number"], input[type="file"] {
+            padding: 10px;
+            margin-bottom: 12px;
+            width: 100%;
+            max-width: 400px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 1em;
+        }
+        label {
+            margin-top: 10px;
+            display: inline-block;
+        }
+        .variables-info {
+            background-color: #f1f5f9;
+            border-radius: 6px;
+            padding: 10px 15px;
+            margin: 10px 0 15px 0;
+            border-left: 4px solid #0ea5e9;
+        }
+        .variables-list {
+            margin: 5px 0;
+            padding-left: 20px;
+        }
+        .variables-list li {
+            margin-bottom: 4px;
+        }
+        .site-name {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #1e40af;
+            margin-bottom: 4px;
+        }
+        .institution {
+            font-size: 0.9em;
+            color: #4b5563;
+            margin-top: 0;
+            margin-bottom: 4px;
+        }
+        .site-id {
+            font-size: 0.9em;
+            color: #4b5563;
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        .parameters-box {
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        .parameters-box h3 {
+            margin-top: 0;
+            color: #334155;
+            font-size: 1em;
+            margin-bottom: 10px;
+        }
+        .parameters-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .parameters-table td {
+            padding: 6px 3px;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 0.9em;
+        }
+        .parameters-table tr:last-child td {
+            border-bottom: none;
+        }
+        .job-status {
+            background-color: #f1f5f9;
+            border-left: 4px solid #0ea5e9;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 6px;
+        }
+        .job-status h3 {
+            margin-top: 0;
+            color: #0c4a6e;
+        }
+        .job-status p {
+            margin: 5px 0;
+        }
+        .status-message {
+            font-family: monospace;
+            background-color: #f8fafc;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            margin-top: 10px;
+        }
+        .btn-warning {
+            background: #f59e0b;
+            color: white;
+            font-weight: bold;
+            padding: 10px 16px;
+            font-size: 1em;
+            border-radius: 6px;
+            cursor: pointer;
+            border: none;
+            margin-top: 10px;
+        }
+        .btn-warning:hover {
+            background: #d97706;
+        }
+        .hidden {
+            display: none;
+        }
+        .message {
+            background-color: #ecfdf5;
+            border-left: 4px solid #10b981;
+            padding: 10px 15px;
+            margin: 10px 0;
+            border-radius: 4px;
+            color: #065f46;
+            font-size: 0.95em;
+        }
+        .refresh-btn {
+            display: inline-block;
+            background-color: #65a30d;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 6px;
+            text-decoration: none;
+            margin: 10px 0;
+            font-weight: 500;
+        }
+        .refresh-btn:hover {
+            background-color: #4d7c0f;
+        }
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 15px;
+        }
+        .site-info-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .site-switcher {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #f0f9ff;
+            padding: 8px 12px;
+            border-radius: 6px;
+        }
+        .site-switcher label {
+            font-weight: 500;
+            color: #0369a1;
+            margin: 0;
+        }
+        .site-switcher select {
+            padding: 6px 12px;
+            border-radius: 4px;
+            border: 1px solid #0ea5e9;
+            background-color: white;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <header class="nav">
+    <a href="/">Home</a>
+    <a href="/jobs">Jobs</a>
+    <span class="site-indicator">Active Site: {{ active_site }}</span>
+    <a href="/settings" style="margin-left:auto">Settings</a>
+  </header>
+    <main class="container">
+      <!-- Hidden job data that will be parsed by JavaScript -->
+      <script type="application/json" id="job-data">
+        {{ jobs|tojson|safe }}
+      </script>
+
+      <div class="card">
+        <div class="card-header">
+            <h1>Remote Site</h1>
+            <a href="/?refresh=true" class="refresh-btn">↻ Refresh Data</a>
+        </div>
+        {% if site_name %}
+        <div class="site-info-container">
+          <div class="site-info">
+            <p class="site-name">Name: {{ site_name }}</p>
+            {% if institution %}<p class="institution">Institution: {{ institution }}</p>{% endif %}
+            <p class="site-id">Site ID: {{ settings.SITE_ID }}</p>
+          </div>
+          
+          <div class="site-switcher">
+            <label for="site-select">Switch Site:</label>
+            <select id="site-select" onchange="window.location.href='?site_index=' + this.value">
+              {% for site in sites %}
+                <option value="{{ loop.index0 }}" {% if site.name == active_site %}selected{% endif %}>
+                  {{ site.name }}
+                </option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        {% endif %}
+        {% if message %}<div class="message">{{ message }}</div>{% endif %}
+        <p>API Backend: <strong>{{ settings.HTTP_URL }}</strong></p>
+        <p>Communication Backend: <strong>{{ settings.CENTRAL_URL }}</strong></p>
+        <p>Site Settings: <a href="/settings"><button>Edit Configuration</button></a></p>
+        {% if token_expiry %}<p>Token expires at: <strong>{{ token_expiry }}</strong></p>{% endif %}
+      </div>
+      <div class="card">
+        <h2>Start Job</h2>
+        <form id="job-form" enctype="multipart/form-data">
+            <label for="job_id"><strong>Job:</strong></label><br>
+            <select id="job_id" name="job_id" required>
+                <option value="">-- Select a job --</option>
+                {% for j in jobs %}
+                <option value="{{ j.id }}">#{{ j.id }} - {{ j.name }} ({{ j.algorithm }})</option>
+                {% endfor %}
+            </select><br>
+            
+            <!-- Dynamic form fields will be inserted here -->
+            <div id="dynamic-form-fields">
+                <!-- Job parameters and variables will appear here -->
+                <input type="hidden" id="mvar" name="mvar" value="1">
+            </div>
+            
+            <label for="csv_file"><strong>CSV File:</strong></label><br>
+            <input type="file" id="csv_file" name="csv_file" accept=".csv" required><br><br>
+            <input type="submit" value="Start Job" class="btn-primary">
+        </form>
+        
+        <!-- Job status display -->
+        <div id="job-status-container" class="job-status hidden">
+            <div class="status-header">
+                <h3>Job Status</h3>
+                <div id="status-indicator" class="status-indicator">Running</div>
+            </div>
+            <div id="status-messages-container" class="status-messages-container">
+                <div id="status-messages" class="status-messages">
+                    <div class="job-status-line">Initializing job...</div>
+                </div>
+            </div>
+            <div class="status-actions">
+                <button id="stop-job-button" class="btn-warning hidden">Stop Job</button>
+            </div>
+        </div>
+      </div>
+    </main>
+</body>
+</html>

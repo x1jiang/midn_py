@@ -1,0 +1,198 @@
+<!doctype html>
+<html>
+<head>
+  <title>Remote - Settings</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    .note {
+      color: #64748b;
+      font-size: 0.85em;
+      font-style: italic;
+      margin-top: -6px;
+      margin-bottom: 10px;
+    }
+    .site-tabs {
+      display: flex;
+      border-bottom: 1px solid #ddd;
+      margin-bottom: 20px;
+    }
+    .site-tab {
+      padding: 10px 15px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      margin-bottom: -1px;
+    }
+    .site-tab.active {
+      border: 1px solid #ddd;
+      border-bottom-color: #fff;
+      background-color: #fff;
+    }
+    .site-content {
+      display: none;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-top: none;
+    }
+    .site-content.active {
+      display: block;
+    }
+    .site-form {
+      margin-bottom: 20px;
+    }
+    .site-selector {
+      margin-bottom: 20px;
+      background: #f8f9fa;
+      padding: 15px;
+      border-radius: 4px;
+    }
+    .site-selector h3 {
+      margin-top: 0;
+    }
+    .site-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .site-link {
+      display: inline-block;
+      padding: 8px 16px;
+      background: #e2e8f0;
+      border-radius: 4px;
+      text-decoration: none;
+      color: #1e293b;
+      font-weight: 500;
+    }
+    .site-link.active {
+      background: #0ea5e9;
+      color: white;
+    }
+    .add-new-site {
+      margin-top: 20px;
+      padding: 10px 15px;
+      background: #e2e8f0;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .current-site-info {
+      margin-bottom: 20px;
+      padding: 15px;
+      background: #f0f9ff;
+      border-left: 4px solid #0ea5e9;
+      border-radius: 4px;
+    }
+    .current-site-info h2 {
+      margin-top: 0;
+      color: #0c4a6e;
+    }
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <a href="/">Home</a>
+    <a href="/jobs">Jobs</a>
+    <span class="site-indicator">Active Site: {{ active_site }}</span>
+    <a href="/settings" style="margin-left:auto">Settings</a>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Settings</h1>
+      
+      <!-- Current Site Info -->
+      <div class="current-site-info">
+        <h2>Current Site: {{ active_site }}</h2>
+        <p>API Backend: <strong>{{ settings.HTTP_URL }}</strong></p>
+        <p>Communication Backend: <strong>{{ settings.CENTRAL_URL }}</strong></p>
+        <p>Site ID: <strong>{{ settings.SITE_ID }}</strong></p>
+        {% if token_expiry %}<p>JWT expires at: <strong>{{ token_expiry }}</strong></p>{% endif %}
+      </div>
+      
+      <!-- No site selector in settings page -->
+      
+      <h2>Manage Sites</h2>
+      <!-- Site Tabs -->
+      <div class="site-tabs">
+        {% for site in sites %}
+        <div class="site-tab" data-site="{{ site.name }}">{{ site.name }}</div>
+        {% endfor %}
+        <div class="site-tab" data-site="new">+ New Site</div>
+      </div>
+      
+      <!-- Site Forms -->
+      {% for site in sites %}
+      <div class="site-content" data-site="{{ site.name }}">
+        <h3>Edit Site: {{ site.name }}</h3>
+        <form method="post" class="site-form">
+          <input type="hidden" name="site_name" value="{{ site.name }}">
+          <label>Central URL (http/https):<br><input name="central_url" value="{{ site.HTTP_URL }}" placeholder="e.g. http://central.example.com" required></label><br>
+          <p class="note">Enter the full URL with protocol (http:// or https://). The system will automatically use the corresponding websocket protocol.</p>
+          <label>Site ID:<br><input name="site_id" value="{{ site.SITE_ID }}" required></label><br>
+          <label>JWT Token:<br><input name="token" value="{{ site.TOKEN }}" required></label><br>
+          <button type="submit">Save</button>
+        </form>
+      </div>
+      {% endfor %}
+      
+      <!-- New Site Form -->
+      <div class="site-content" data-site="new">
+        <h3>Add New Site</h3>
+        <form method="post" class="site-form">
+          <label>Site Name:<br><input name="site_name" placeholder="e.g. Site 2" required></label><br>
+          <label>Central URL (http/https):<br><input name="central_url" placeholder="e.g. http://central.example.com" required></label><br>
+          <p class="note">Enter the full URL with protocol (http:// or https://). The system will automatically use the corresponding websocket protocol.</p>
+          <label>Site ID:<br><input name="site_id" placeholder="Your site ID" required></label><br>
+          <label>JWT Token:<br><input name="token" placeholder="Your JWT token" required></label><br>
+          <button type="submit">Add Site</button>
+        </form>
+      </div>
+    </div>
+  </main>
+  
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      // Set the first site tab active by default, or the active site if one is set
+      const activeSiteName = "{{ active_site }}";
+      let activeTab;
+      
+      const tabs = document.querySelectorAll('.site-tab');
+      tabs.forEach(tab => {
+        const siteName = tab.getAttribute('data-site');
+        if (siteName === activeSiteName) {
+          activeTab = tab;
+        }
+        
+        tab.addEventListener('click', function() {
+          // Hide all content
+          const contents = document.querySelectorAll('.site-content');
+          contents.forEach(content => {
+            content.classList.remove('active');
+          });
+          
+          // Remove active class from all tabs
+          tabs.forEach(t => {
+            t.classList.remove('active');
+          });
+          
+          // Add active class to clicked tab
+          this.classList.add('active');
+          
+          // Show corresponding content
+          const siteName = this.getAttribute('data-site');
+          const content = document.querySelector(`.site-content[data-site="${siteName}"]`);
+          if (content) {
+            content.classList.add('active');
+          }
+        });
+      });
+      
+      // Activate the tab for the current site or the first one
+      if (activeTab) {
+        activeTab.click();
+      } else if (tabs.length > 0) {
+        tabs[0].click();
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Error - Remote Site</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <style>
+        .error-box {
+            background-color: #fee2e2;
+            border: 1px solid #ef4444;
+            color: #b91c1c;
+            padding: 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+        }
+        .back-button {
+            display: inline-block;
+            background-color: #0ea5e9;
+            color: white;
+            text-decoration: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-weight: bold;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <header class="nav">
+      <a href="/">Home</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/settings" style="margin-left:auto">Settings</a>
+    </header>
+    <main class="container">
+      <div class="card">
+        <h1>Error</h1>
+        <div class="error-box">
+            {{ error }}
+        </div>
+        <p>Please correct the error and try again.</p>
+        <a href="/" class="back-button">Back to Home</a>
+      </div>
+    </main>
+</body>
+</html>

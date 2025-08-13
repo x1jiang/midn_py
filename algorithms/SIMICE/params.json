@@ -1,0 +1,34 @@
+{
+    "title": "SIMICE Algorithm Parameters",
+    "type": "object",
+    "properties": {
+        "target_column_indexes": {
+            "type": "array",
+            "items": { "type": "integer", "minimum": 1 },
+            "minItems": 1,
+            "description": "List of 1-based indices of columns to be imputed."
+        },
+        "is_binary": {
+            "type": "array",
+            "items": { "type": "boolean" },
+            "minItems": 1,
+            "description": "List of booleans per target column indicating binary (true) or continuous (false). Order aligns with target_column_indexes."
+        },
+        "iteration_before_first_imputation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Iterations to run before the first imputation round."
+        },
+        "iteration_between_imputations": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Iterations to run between subsequent imputations."
+        }
+    },
+    "required": [
+        "target_column_indexes",
+        "is_binary",
+        "iteration_before_first_imputation",
+        "iteration_between_imputations"
+    ]
+}

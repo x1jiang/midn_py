@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <title>Admin Login</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header><div class="container nav"><a href="/gui/users/register">Register User</a></div></header>
+  <main class="container">
+    <div class="card">
+      <h1>Admin Login</h1>
+      <form method="post">
+        <label>Password:<br><input type="password" name="password" required></label><br>
+        <button type="submit">Login</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

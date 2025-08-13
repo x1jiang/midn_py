@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <title>Central - Home</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Central Server</h1>
+      <p>Manage sites and SIMI jobs.</p>
+      <p><a href="/gui/users/register">Register a new site</a></p>
+    </div>
+  </main>
+</body>
+</html>

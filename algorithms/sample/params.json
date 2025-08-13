@@ -1,0 +1,15 @@
+{
+    "title": "Sample Algorithm Parameters",
+    "type": "object",
+    "properties": {
+        "param1": {
+            "type": "string",
+            "description": "A sample string parameter."
+        },
+        "param2": {
+            "type": "integer",
+            "description": "A sample integer parameter."
+        }
+    },
+    "required": ["param1", "param2"]
+}

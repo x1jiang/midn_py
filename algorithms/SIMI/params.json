@@ -1,0 +1,18 @@
+{
+    "title": "SIMI Algorithm Parameters",
+    "type": "object",
+    "properties": {
+        "target_column_index": {
+            "type": "integer",
+            "description": "The 1-based index of the column to be imputed."
+        },
+        "is_binary": {
+            "type": "boolean",
+            "description": "Specifies if the target column is binary (true) or continuous (false)."
+        }
+    },
+    "required": [
+        "target_column_index",
+        "is_binary"
+    ]
+}

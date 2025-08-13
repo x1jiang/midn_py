@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head>
+  <title>Remote - Jobs</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    .refresh-btn {
+      display: inline-block;
+      background-color: #65a30d;
+      color: white;
+      padding: 8px 15px;
+      border-radius: 6px;
+      text-decoration: none;
+      margin: 10px 0;
+      font-weight: 500;
+    }
+    .refresh-btn:hover {
+      background-color: #4d7c0f;
+    }
+    .message {
+      background-color: #ecfdf5;
+      border-left: 4px solid #10b981;
+      padding: 10px 15px;
+      margin: 10px 0;
+      border-radius: 4px;
+      color: #065f46;
+      font-size: 0.95em;
+    }
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 15px;
+    }
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <a href="/">Home</a>
+    <a href="/jobs">Jobs</a>
+    <span class="site-indicator">Active Site: {{ active_site }}</span>
+    <a href="/settings" style="margin-left:auto">Settings</a>
+  </header>
+  <main class="container">
+    <div class="card">
+      <div class="card-header">
+        <h1>Assigned Jobs</h1>
+        <a href="/jobs?refresh=true" class="refresh-btn">↻ Refresh Data</a>
+      </div>
+      {% if site_name %}
+      <div class="site-info-container">
+        <div class="site-info">
+          <p class="site-name">Name: {{ site_name }}</p>
+          {% if institution %}<p class="institution">Institution: {{ institution }}</p>{% endif %}
+          <p class="site-id">Site ID: {{ settings.SITE_ID }}</p>
+        </div>
+      </div>
+      {% endif %}
+      {% if message %}<div class="message">{{ message }}</div>{% endif %}
+      {% if token_expiry %}<p>Token expires at: <strong>{{ token_expiry }}</strong></p>{% endif %}
+      <table class="table" aria-labelledby="remote-jobs-heading">
+        <caption id="remote-jobs-heading">List of jobs available at this site</caption>
+        <thead>
+          <tr>
+            <th scope="col">ID</th>
+            <th scope="col">Name</th>
+            <th scope="col">Algorithm</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for j in jobs %}
+          <tr>
+            <td>{{ j.id }}</td>
+            <td>{{ j.name }}</td>
+            <td>{{ j.algorithm }}</td>
+            <td>{{ j.status }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head>
+  <title>Create Job</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Create Job</h1>
+      <form method="post">
+        <label>Algorithm:<br>
+          <select name="algorithm" id="algo-select" required>
+            {% for a in algorithms %}
+              <option value="{{ a }}">{{ a }}</option>
+            {% endfor %}
+          </select>
+        </label><br>
+        <label>Name:<br><input name="name" required></label><br>
+        <label>Description:<br><input name="description"></label><br>
+        <label>Participants (select approved sites):<br>
+          <select name="participants" multiple size="6" required>
+            {% for u in approved_users %}
+              <option value="{{ u.site_id }}">{{ u.username }} ({{ u.site_id }})</option>
+            {% endfor %}
+          </select>
+        </label><br>
+
+        <div class="card" style="background:#f8fafc">
+          <h3>Select Columns by Header (optional)</h3>
+          <p>Upload a CSV to load headers, then pick the target column(s). We will store 1-based indices.</p>
+          <label>CSV with headers:<br><input type="file" id="header-file" accept=".csv"></label><br>
+          <!-- Header selects populated by JS -->
+          <div class="section-simi">
+            <label>Pick target header (SIMI):<br>
+              <select id="simi-header-select"></select>
+            </label>
+          </div>
+          <div class="section-simice" style="display:none">
+            <label>Pick target headers (SIMICE):<br>
+              <select id="simice-headers-select" multiple size="8"></select>
+            </label>
+          </div>
+        </div>
+
+        <!-- SIMI section -->
+        <div class="section-simi">
+          <h3>SIMI Parameters</h3>
+          <label>Target Column Index (1-based):<br><input type="number" name="target_column_index" id="target_column_index" min="1"></label><br>
+          <div class="checkbox-container">
+            <input type="checkbox" name="is_binary" id="is_binary" value="true">
+            <label for="is_binary">Binary Target</label>
+          </div><br>
+        </div>
+
+        <!-- SIMICE section -->
+        <div class="section-simice" style="display:none">
+          <h3>SIMICE Parameters</h3>
+          <label>Target Column Indexes (comma-separated 1-based):<br><input type="text" name="target_column_indexes" id="target_column_indexes" placeholder="e.g., 2,5,7"></label><br>
+          <div class="checkbox-container">
+            <label>Is Binary per column:</label>
+            <button type="button" class="btn-secondary" id="open-binary-modal">Set per-column types</button>
+          </div>
+          <input type="text" name="is_binary_list" id="is_binary_list" placeholder="true,false,true" readonly>
+          <br>
+          <label>Iter before first:<br><input type="number" name="iteration_before_first_imputation" min="0" value="0"></label><br>
+          <label>Iter between:<br><input type="number" name="iteration_between_imputations" min="0" value="0"></label><br>
+        </div>
+
+        <label>Number of Imputation Trials:<br><input type="number" name="imputation_trials" value="10" min="1"></label><br>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Create</button>
+      </form>
+    </div>
+  </main>
+
+  <!-- Binary modal -->
+  <div id="binary-modal" class="modal" style="display:none">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Is Binary per selected column</h3>
+        <button type="button" class="close" id="binary-modal-close">×</button>
+      </div>
+      <div class="modal-body" id="binary-list"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" id="binary-modal-cancel">Cancel</button>
+        <button type="button" class="btn-primary" id="binary-modal-save">Save</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

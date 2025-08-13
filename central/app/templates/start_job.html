@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <title>Start Job</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    {% if message %}
+    <div class="alert alert-success">{{ message }}</div>
+    {% endif %}
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+    
+    <!-- Status display for running job - hidden by default, shown by JS when a job is running -->
+    <div class="card{% if not active_job_id %} hidden{% endif %}" id="job-status-container">
+      <h2>Job {% if active_job_id %}#{{ active_job_id }}{% endif %} Status</h2>
+      <div id="job-status-messages" class="job-status-log">
+        <div class="job-status-line">Initializing job...</div>
+      </div>
+      <div class="job-controls">
+        <button type="button" id="stop-job-btn" class="btn-danger">Stop Job</button>
+        <span id="job-status-indicator" class="status-running">Running</span>
+      </div>
+    </div>
+    
+    <!-- Pass the active job ID to JavaScript if provided by server -->
+    {% if active_job_id %}
+    <script>
+      window.activeJobId = {{ active_job_id }};
+    </script>
+    {% endif %}
+    
+    <div class="card">
+      <h1>Start Job</h1>
+      
+      <!-- Hidden job data that will be parsed by JavaScript -->
+      <script type="application/json" id="job-data">
+        {{ jobs|tojson|safe }}
+      </script>
+      
+      <form method="post" enctype="multipart/form-data" id="start-job-form">
+        <label>Job:<br>
+          <select id="job-select" name="job_id" required {% if active_job_id %}disabled{% endif %}>
+            <option value="">-- Select a job --</option>
+            {% for j in jobs %}
+              <option value="{{ j.id }}" {% if active_job_id == j.id %}selected{% endif %}>#{{ j.id }} - {{ j.name }} ({{ j.algorithm }})</option>
+            {% endfor %}
+          </select>
+        </label><br>
+        
+        <!-- Job parameters will be displayed here -->
+        <div id="job-parameters"></div>
+        
+        <label>Central CSV:<br><input type="file" name="central_data_file" accept=".csv" required {% if active_job_id %}disabled{% endif %}></label><br>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" {% if active_job_id %}disabled{% endif %}>Start</button>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

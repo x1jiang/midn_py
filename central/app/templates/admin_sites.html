@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+  <title>Admin - Sites</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script>
+    function approveWithExpiry(formId){
+      const days = prompt('Enter JWT expiry days', '30');
+      if(days===null) return false; // cancel
+      const n = parseInt(days,10);
+      if(isNaN(n) || n<=0){ alert('Invalid number'); return false; }
+      const f = document.getElementById(formId);
+      f.querySelector('input[name="expires_days"]').value = String(n);
+      return true;
+    }
+  </script>
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Sites</h1>
+      <p><a href="/gui/users/register"><button>Register Site</button></a></p>
+      <table class="table" aria-labelledby="sites-heading">
+        <caption id="sites-heading">List of all remote sites</caption>
+        <thead>
+          <tr>
+            <th scope="col">ID</th>
+            <th scope="col">Site name</th>
+            <th scope="col">Email</th>
+            <th scope="col">Institution</th>
+            <th scope="col">Approved</th>
+            <th scope="col">Site ID</th>
+            <th scope="col">JWT Expires</th>
+            <th scope="col">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td>{{ u.id }}</td>
+            <td>{{ u.username }}</td>
+            <td>{{ u.email }}</td>
+            <td>{{ u.institution }}</td>
+            <td>{{ 'Yes' if u.is_approved else 'No' }}</td>
+            <td>{{ u.site_id }}</td>
+            <td>{% if u.jwt_expires_at %}{{ u.jwt_expires_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC{% else %}-{% endif %}</td>
+            <td>
+              <form id="approve-{{ u.id }}" method="post" action="/gui/admin/sites/{{ u.id }}/approve" style="display:inline" onsubmit="return approveWithExpiry('approve-{{ u.id }}')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="expires_days" value="30">
+                <button type="submit" aria-label="Approve site {{ u.username }}">Approve</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>
