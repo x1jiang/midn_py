@@ -16,8 +16,11 @@ from .core.config import settings
 from .core.csrf import get_csrf_token, gen_csrf_token, CSRF_COOKIE
 from .websockets.connection_manager import ConnectionManager
 from .api import users as sites_api, jobs, remote as remote_api
-from .services.simi_service import SIMIService
+from .services.algorithm_factory import AlgorithmServiceFactory
 from starlette.middleware.base import BaseHTTPMiddleware
+
+# Initialize algorithm services
+from .services.init_services import *
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -68,7 +71,8 @@ def test_job_check():
 
 
 manager = ConnectionManager()
-simi_service = SIMIService(manager)
+
+# Algorithm services will be created dynamically using the factory
 
 # ---------------- GUI ROUTES ----------------
 # Simple admin auth + CSRF
@@ -407,8 +411,10 @@ async def gui_jobs_start_post(
             jobs.append(job_dict)
         
         # Dispatch based on algorithm
-        if (db_job.algorithm or "").upper() == "SIMI":
-            asyncio.create_task(simi_service.start_job(db_job, central_data))
+        algorithm_name = (db_job.algorithm or "").upper()
+        try:
+            algorithm_service = AlgorithmServiceFactory.create_service(algorithm_name, manager)
+            asyncio.create_task(algorithm_service.start_job(db_job, central_data))
             # Return to the same page with job_id pre-selected
             return templates.TemplateResponse("start_job.html", {
                 "request": request, 
@@ -417,12 +423,12 @@ async def gui_jobs_start_post(
                 "active_job_id": job_id,  # Pass the active job ID to highlight it
                 "message": f"Job {job_id} started. Monitoring status..."
             })
-        else:
+        except ValueError as e:
             return templates.TemplateResponse("start_job.html", {
                 "request": request, 
                 "csrf_token": csrf_token, 
                 "jobs": jobs,
-                "error": f"Unsupported algorithm: {db_job.algorithm}"
+                "error": str(e)
             })
     except Exception as e:
         # Handle errors and return to the same page
@@ -544,25 +550,94 @@ async def start_job(job_id: int, central_data_file: UploadFile = File(...), db: 
     central_data = pd.read_csv(central_data_file.file)
 
     # Dispatch based on algorithm
-    if (db_job.algorithm or "").upper() == "SIMI":
-        asyncio.create_task(simi_service.start_job(db_job, central_data))
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported algorithm: {db_job.algorithm}")
+    algorithm_name = (db_job.algorithm or "").upper()
+    try:
+        algorithm_service = AlgorithmServiceFactory.create_service(algorithm_name, manager)
+        asyncio.create_task(algorithm_service.start_job(db_job, central_data))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     return {"message": "Job started"}
 
 @app.websocket("/ws/{site_id}")
 async def websocket_endpoint(websocket: WebSocket, site_id: str, token: str = Depends(security.get_token_ws)):
     # WebSocket remains JWT-guarded for remotes
+    print(f"🔌 WebSocket: New connection from site {site_id}")
+    print(f"🎫 WebSocket: Token validated for site {site_id}")
+    
     await manager.connect(websocket, site_id)
+    print(f"✅ WebSocket: Connection established for site {site_id}")
+    
     try:
         while True:
             data = await websocket.receive_text()
-            await simi_service.handle_message(site_id, data)
+            print(f"📨 WebSocket: Received message from site {site_id}")
+            print(f"💬 WebSocket: Message preview: {data[:200]}{'...' if len(data) > 200 else ''}")
+            
+            # Route message to the appropriate algorithm service
+            await route_websocket_message(site_id, data)
+            print(f"✅ WebSocket: Message routed successfully for site {site_id}")
+            
     except Exception as e:
-        print(f"WebSocket Error: {e}")
+        print(f"💥 WebSocket Error for site {site_id}: {e}")
     finally:
+        print(f"🔌 WebSocket: Disconnecting site {site_id}")
         manager.disconnect(websocket, site_id)
+        print(f"❌ WebSocket: Site {site_id} disconnected")
+
+async def route_websocket_message(site_id: str, data: str):
+    """
+    Route WebSocket message to the appropriate algorithm service.
+    """
+    print(f"🎯 Router: Processing message from site {site_id}")
+    
+    try:
+        # Parse message to determine which algorithm/job it belongs to
+        import json
+        from common.algorithm.protocol import parse_message
+        
+        print(f"📝 Router: Parsing message from site {site_id}")
+        # parse_message returns a dictionary, not a tuple
+        message_data = parse_message(data)
+        message_type = message_data.get('type')
+        job_id = message_data.get('job_id')
+        
+        print(f"🔍 Router: Parsed message - type: {message_type}, job_id: {job_id}")
+        
+        if job_id:
+            # Look up the job to determine which algorithm service to use
+            from .db import get_db
+            from . import services
+            
+            print(f"🔍 Router: Looking up job {job_id}")
+            db = next(get_db())
+            try:
+                db_job = services.job_service.get_job(db, job_id=job_id)
+                if db_job:
+                    algorithm_name = (db_job.algorithm or "").upper()
+                    print(f"🎯 Router: Found job {job_id}, algorithm: {algorithm_name}")
+                    
+                    algorithm_service = AlgorithmServiceFactory.create_service(algorithm_name, manager)
+                    print(f"🏭 Router: Created {algorithm_name} service for job {job_id}")
+                    
+                    await algorithm_service.handle_site_message(site_id, data)
+                    print(f"✅ Router: Message handled by {algorithm_name} service")
+                else:
+                    print(f"❌ Router: Job {job_id} not found for message from site {site_id}")
+            except Exception as e:
+                print(f"💥 Router: Error routing message from site {site_id}: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                db.close()
+        else:
+            print(f"❌ Router: No job_id in message from site {site_id}: {data[:100]}{'...' if len(data) > 100 else ''}")
+            
+    except Exception as e:
+        print(f"💥 Router: Error parsing message from site {site_id}: {e}")
+        print(f"📝 Router: Problematic message: {data[:200]}{'...' if len(data) > 200 else ''}")
+        import traceback
+        traceback.print_exc()
 
 @app.get("/health")
 def read_health():

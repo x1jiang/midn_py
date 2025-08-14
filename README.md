@@ -1,8 +1,47 @@
-# PYMIDN - Federated Imputation (SIMI)
+# PYMIDN - Federated Imputation (SIMI & SIMICE)
 
-This repo provides a Python-only FastAPI implementation of a federated imputation system. The central server orchestrates imputation jobs; remote sites contribute only aggregates via WebSockets.
+This repo provides a Python-only FastAPI implementation of a federated imputation sy## Ready the remote and upload local CSV
+Open the remote UI in a browser:
+- http://127.0.0.1:8001/
+- Enter Job ID (e.g., 1)
+- **For SIMI**: Enter Missing Variable Index (1-based) matching the job (e.g., 2)
+- **For SIMICE**: The UI will automatically handle multiple target variables based on job parameters
+- Choose the local site's CSV
+- Click Start
 
-Only one algorithm is implemented: SIMI (Gaussian and Logistic paths).
+The remote connects to central via WebSocket and sends aggregates.
+
+## Result
+When all participants are ready and data have been aggregated:
+- Central writes `imputed_data_<job_id>.csv` in the repo root.
+- **SIMI**: Single imputed dataset
+- **SIMICE**: Multiple complete datasets (currently saves the first one)
+- Job status changes to `completed`.
+
+## Algorithm Comparison
+
+| Feature | SIMI | SIMICE |
+|---------|------|--------|
+| Target Variables | Single column | Multiple columns |
+| Variable Types | One type per job | Mixed types (continuous + binary) |
+| Approach | Direct imputation | Chained equations |
+| Iterations | Fixed | Configurable (before first vs between) |
+| Use Case | Simple missing data | Complex missing patterns |
+
+## Logistic SIMI (binary)
+Use `is_binary: true` and binary target data (0/1):
+- In job creation, set both `parameters.is_binary` and `missing_spec.is_binary` to `true`.
+- Remote UI's Missing Variable Index must still match the same column.
+
+## SIMICE with Mixed Types
+SIMICE can handle both continuous and binary variables in the same job:
+- Set `target_column_indexes` to the list of 1-based column indices
+- Set `is_binary` array where `true` indicates binary variables, `false` for continuous
+- The algorithm will automatically apply Gaussian imputation for continuous and logistic for binary variableserver orchestrates imputation jobs; remote sites contribute only aggregates via WebSockets.
+
+Two algorithms are implemented: 
+- **SIMI** (Sequential Imputation using Model Imputation) - Gaussian and Logistic paths for single variables
+- **SIMICE** (Sequential Imputation using Multiple Imputation with Chained Equations) - Multiple variables with mixed types
 
 ## Prerequisites
 - Python 3.10+
@@ -75,10 +114,13 @@ export TOKEN=<JWT_FROM_ABOVE>
 ```
 Restart the remote app if it’s already running.
 
-## Create a job (SIMI)
-Jobs are validated against `algorithms/SIMI/params.json`, and SIMI execution uses `missing_spec` to decide the target column and method.
+## Create a job (SIMI or SIMICE)
+Jobs are validated against the respective algorithm's params.json schema.
 
-- Create a job
+### SIMI Job (Single Variable)
+SIMI execution uses `missing_spec` to decide the target column and method.
+
+- Create a SIMI job
 ```bash
 curl -X POST http://127.0.0.1:8000/api/jobs/ \
   -H 'Content-Type: application/json' \
@@ -91,6 +133,33 @@ curl -X POST http://127.0.0.1:8000/api/jobs/ \
     "missing_spec": {"target_column_index": 2, "is_binary": false},
     "iteration_before_first_imputation": 0,
     "iteration_between_imputations": 0
+  }'
+```
+
+### SIMICE Job (Multiple Variables)
+SIMICE handles multiple target columns with mixed types using chained equations.
+
+- Create a SIMICE job
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "SIMICE demo",
+    "description": "Multi-variable SIMICE with mixed types",
+    "algorithm": "SIMICE",
+    "parameters": {
+      "target_column_indexes": [2, 4], 
+      "is_binary": [false, true],
+      "iteration_before_first_imputation": 5,
+      "iteration_between_imputations": 3
+    },
+    "participants": ["<SITE_ID_FROM_CENTRAL>"],
+    "missing_spec": {
+      "target_column_indexes": [2, 4], 
+      "is_binary": [false, true]
+    },
+    "iteration_before_first_imputation": 5,
+    "iteration_between_imputations": 3
   }'
 ```
 - Start the job (upload central CSV)

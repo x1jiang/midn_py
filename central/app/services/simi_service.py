@@ -88,7 +88,7 @@ class SIMIService(BaseAlgorithmService):
             self.job_status_tracker.fail_job(job_id, str(e))
             raise
     
-    async def handle_message(self, site_id: str, message_str: str) -> None:
+    async def handle_site_message(self, site_id: str, message_str: str) -> None:
         """
         Handle a message from a remote site.
         

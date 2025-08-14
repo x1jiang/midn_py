@@ -68,3 +68,49 @@ async def run_simi_remote(data: np.ndarray, mvar: int, job_id: int, site_id: str
         if status_callback:
             await status_callback.on_error(f"Error running SIMI algorithm: {str(e)}")
         raise
+
+
+async def run_simice_remote(data: np.ndarray, target_column_indexes: list, job_id: int, site_id: str,
+                           central_url: str, token: str, is_binary: list = None,
+                           extra_params=None, status_callback=None):
+    """
+    LEGACY ADAPTER - Run the SIMICE algorithm remotely.
+    
+    This function exists for backward compatibility. New code should use
+    the SIMICE client service directly.
+    
+    Args:
+        data: Data array
+        target_column_indexes: List of target column indices (1-based)
+        job_id: ID of the job
+        site_id: ID of this site
+        central_url: URL of the central server
+        token: Authentication token
+        is_binary: List of binary flags for each target column
+        extra_params: Additional parameters for the algorithm
+        status_callback: Callback for status updates
+    """
+    try:
+        # Prepare extra parameters
+        params = extra_params or {}
+        
+        # Create the SIMICE client
+        client = AlgorithmClientFactory.create_client("SIMICE")
+        
+        # Run the algorithm
+        await client.run_algorithm(
+            data=data,
+            target_column_indexes=target_column_indexes,
+            job_id=job_id,
+            site_id=site_id,
+            central_url=central_url,
+            token=token,
+            is_binary=is_binary,
+            extra_params=params,
+            status_callback=status_callback
+        )
+        
+    except Exception as e:
+        if status_callback:
+            await status_callback.on_error(f"Error running SIMICE algorithm: {str(e)}")
+        raise

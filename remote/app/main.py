@@ -13,6 +13,7 @@ from . import config
 from .services.algorithm_factory import AlgorithmClientFactory
 from .custom_templates import templates
 from . import services  # Ensure algorithm clients are registered
+from .services import init_clients  # Initialize algorithm clients
 import algorithms  # Ensure algorithm implementations are registered
 from .job_status import JobStatusCallback
 from .routes import jobs as jobs_routes
@@ -401,20 +402,29 @@ async def start_job(
             print(f"Starting SIMICE job with site ID: {config.settings.SITE_ID}, site name: {config.settings.current_site.name}")
             print(f"Extra params: {extra_params}")
             
+            # Get target columns and binary flags from job parameters
+            target_column_indexes = job_details["parameters"]["target_column_indexes"] if job_details else [mvar]
+            is_binary_list = job_details["parameters"]["is_binary"] if job_details else [False]
+            
+            print(f"SIMICE target columns: {target_column_indexes}")
+            print(f"SIMICE binary flags: {is_binary_list}")
+            
             # Create a status callback with site ID
             status_callback = JobStatusCallback(app, job_id, config.settings.SITE_ID)
             
-            # Start SIMICE job with status updates (using SIMI for now)
-            client = AlgorithmClientFactory.create_client("SIMI")
+            # Start SIMICE job with correct client
+            client = AlgorithmClientFactory.create_client("SIMICE")
             asyncio.create_task(client.run_algorithm(
                 data=df.values,
-                target_column=mvar_index,
+                target_column=target_column_indexes[0] - 1,  # Convert first column to 0-based for compatibility
                 job_id=job_id,
                 site_id=config.settings.SITE_ID,
                 central_url=config.settings.CENTRAL_URL,
                 token=config.settings.TOKEN,
                 extra_params=extra_params,
-                status_callback=status_callback
+                status_callback=status_callback,
+                target_column_indexes=target_column_indexes,  # Pass as kwarg
+                is_binary=is_binary_list  # Pass as kwarg
             ))
         else:
             # Default to SIMI algorithm

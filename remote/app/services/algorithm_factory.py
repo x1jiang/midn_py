@@ -40,8 +40,11 @@ class AlgorithmClientFactory:
         Raises:
             ValueError: If no client is registered for the algorithm
         """
+        print(f"🏭 AlgorithmClientFactory: Request for '{algorithm_name}' client")
+        print(f"🔍 AlgorithmClientFactory: Available clients: {list(cls._client_classes.keys())}")
+        
         if algorithm_name not in cls._client_classes:
-            raise ValueError(f"No client registered for algorithm '{algorithm_name}'")
+            raise ValueError(f"No client registered for algorithm '{algorithm_name}'. Available: {list(cls._client_classes.keys())}")
         
         client_class = cls._client_classes[algorithm_name]
         

@@ -54,7 +54,7 @@ class BaseAlgorithmService(ABC):
             await asyncio.sleep(1)
     
     @abstractmethod
-    async def handle_message(self, site_id: str, message: str) -> None:
+    async def handle_site_message(self, site_id: str, message: str) -> None:
         """
         Handle a message from a remote site.
         
