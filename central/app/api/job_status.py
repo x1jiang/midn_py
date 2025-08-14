@@ -17,7 +17,23 @@ async def get_job_status(job_id: int):
     job_status = tracker.get_job_status(job_id)
     
     if job_status:
-        return job_status.to_dict()
+        response = job_status.to_dict()
+        
+        # Double-check if there's an imputed dataset path available for completed jobs
+        if job_status.completed and not response.get('imputed_dataset_path'):
+            # Check the database for the imputed_dataset_path
+            from ..db.database import SessionLocal
+            from ..models.job import Job
+            
+            db = SessionLocal()
+            try:
+                job = db.query(Job).filter(Job.id == job_id).first()
+                if job and job.imputed_dataset_path:
+                    response['imputed_dataset_path'] = job.imputed_dataset_path
+            finally:
+                db.close()
+                
+        return response
     else:
         return {"status": "Job not found", "completed": True, "messages": ["Job not found or not started"]}
 

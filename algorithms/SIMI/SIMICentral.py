@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# This is a old archive file for the SIMI Central site implementation, it is out of date
 
 """
 SIMICentral.py - SIMI Central site implementation

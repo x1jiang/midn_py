@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# This is a old archive file for the SIMI remote site implementation, do not use it
+
 """
 SIMIRemote.py - SIMI Remote site implementation (wired for FastAPI orchestration)
 - Keeps original CLI/websocket server behavior in SIMIRemote_base.py

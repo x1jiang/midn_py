@@ -49,6 +49,25 @@ button:hover, input[type=submit]:hover {
   background:rgb(0, 53, 115);
 }
 
+/* Download button style */
+.btn-primary {
+  background: #0ea5e9;
+  border: none;
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 1rem;
+  text-decoration: none;
+  display: inline-block;
+  transition: background-color 0.2s;
+}
+
+.btn-primary:hover {
+  background: #0284c7;
+}
+
 button:focus, input[type=submit]:focus {
   outline: 3px solid rgba(0, 40, 86, 0.4);
   outline-offset: 2px;

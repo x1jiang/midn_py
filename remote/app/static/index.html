@@ -206,7 +206,6 @@
       <div class="card">
         <div class="card-header">
             <h1>Remote Site</h1>
-            <a href="/?refresh=true" class="refresh-btn">↻ Refresh Data</a>
         </div>
         {% if site_name %}
         <div class="site-info-container">
@@ -236,6 +235,9 @@
       </div>
       <div class="card">
         <h2>Start Job</h2>
+        <div class="refresh-container" style="margin-bottom: 15px;">
+          <button id="refresh-jobs-btn" class="refresh-btn" type="button">↻ Refresh Jobs</button>
+        </div>
         <form id="job-form" enctype="multipart/form-data">
             <label for="job_id"><strong>Job:</strong></label><br>
             <select id="job_id" name="job_id" required>

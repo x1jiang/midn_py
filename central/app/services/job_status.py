@@ -27,8 +27,28 @@ class JobStatus:
         """Mark the job as completed"""
         self.completed = True
         self.status = "Completed"
-        self.messages.append("Job completed successfully")
+        self.messages.append(f"Job {self.job_id}: Status tracker marked job as completed")
         self.result = result
+        
+        # Update the job status in the database
+        try:
+            # Import here to avoid circular imports
+            from ..db.database import SessionLocal
+            from ..models.job import Job
+            
+            db = SessionLocal()
+            try:
+                # Update job status in database
+                job = db.query(Job).filter(Job.id == self.job_id).first()
+                if job:
+                    job.status = "Completed"
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            # Log the error but don't fail the job completion
+            self.messages.append(f"Warning: Could not update job status in database: {str(e)}")
+            print(f"Error updating job status in database: {str(e)}")
         
     def fail(self, error: str):
         """Mark the job as failed"""
@@ -39,6 +59,23 @@ class JobStatus:
         
     def to_dict(self):
         """Convert to dictionary for API responses"""
+        # Check if there's an imputed dataset path available
+        imputed_dataset_path = None
+        try:
+            # Import here to avoid circular imports
+            from ..db.database import SessionLocal
+            from ..models.job import Job
+            
+            db = SessionLocal()
+            try:
+                job = db.query(Job).filter(Job.id == self.job_id).first()
+                if job:
+                    imputed_dataset_path = job.imputed_dataset_path
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"Error checking imputed dataset path: {str(e)}")
+        
         return {
             "job_id": self.job_id,
             "status": self.status,
@@ -46,7 +83,8 @@ class JobStatus:
             "start_time": self.start_time.isoformat(),
             "completed": self.completed,
             "error": self.error,
-            "result": self.result
+            "result": self.result,
+            "imputed_dataset_path": imputed_dataset_path
         }
 
 class JobStatusTracker:

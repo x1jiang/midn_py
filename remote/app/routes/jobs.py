@@ -48,12 +48,15 @@ async def get_job_status(request: Request, job_id: int, site_id: str = None):
 async def stop_job(request: Request, job_id: int, site_id: str = None):
     """Stop a running job"""
     job_status = None
+    found_site_jobs_attr = None
     
     # If site_id is provided, look in that site's job dictionary
     if site_id:
         site_jobs_attr = f'running_jobs_{site_id}'
         site_jobs = getattr(request.app.state, site_jobs_attr, {})
         job_status = site_jobs.get(job_id)
+        if job_status:
+            found_site_jobs_attr = site_jobs_attr
     else:
         # Look through all site job dictionaries
         for attr_name in dir(request.app.state):
@@ -61,13 +64,24 @@ async def stop_job(request: Request, job_id: int, site_id: str = None):
                 site_jobs = getattr(request.app.state, attr_name, {})
                 if job_id in site_jobs:
                     job_status = site_jobs[job_id]
+                    found_site_jobs_attr = attr_name
                     break
     
-    if job_status and not job_status.get('completed'):
-        # TODO: Implement actual job stopping mechanism
-        # For now, just mark it as completed
+    if job_status:
+        # Mark job as completed
         job_status['completed'] = True
         job_status['status'] = "Job stopped by user"
+        
+        # Log job stopping
+        print(f"Job {job_id} marked as stopped")
+        
+        # Remove the job from the dictionary to prevent memory leaks
+        # This also ensures has_running_jobs won't encounter this job again
+        if found_site_jobs_attr:
+            site_jobs = getattr(request.app.state, found_site_jobs_attr)
+            if job_id in site_jobs:
+                print(f"Removing job {job_id} from {found_site_jobs_attr}")
+                del site_jobs[job_id]
         job_status['messages'].append("Job stopped by user")
         return {"success": True, "site_id": job_status.get('site_id', '')}
     else:
@@ -83,11 +97,19 @@ async def check_running_jobs(request: Request, site_id: Optional[str] = None):
         site_jobs_attr = f'running_jobs_{site_id}'
         site_jobs = getattr(request.app.state, site_jobs_attr, {})
         
-        # Find the first running job
+        # Clean up completed jobs to prevent memory leaks and state issues
+        jobs_to_remove = []
         for job_id, job in site_jobs.items():
-            if not job.get('completed', False):
+            if job.get('completed', False):
+                jobs_to_remove.append(job_id)
+            elif running_job_id is None:
+                # Found first running job
                 running_job_id = job_id
-                break
+        
+        # Remove completed jobs
+        for job_id in jobs_to_remove:
+            print(f"Cleaning up completed job {job_id} from {site_jobs_attr}")
+            del site_jobs[job_id]
                 
         print(f"Checked for running jobs on site {site_id}: {running_job_id or 'None'}")
     else:
@@ -95,14 +117,53 @@ async def check_running_jobs(request: Request, site_id: Optional[str] = None):
         for attr_name in dir(request.app.state):
             if attr_name.startswith('running_jobs_'):
                 site_jobs = getattr(request.app.state, attr_name, {})
+                
+                # Clean up completed jobs for this site
+                jobs_to_remove = []
                 for job_id, job in site_jobs.items():
-                    if not job.get('completed', False):
+                    if job.get('completed', False):
+                        jobs_to_remove.append(job_id)
+                    elif running_job_id is None:
+                        # Found first running job
                         running_job_id = job_id
                         site_id = attr_name[13:]  # Extract site_id from attribute name
-                        break
+                
+                # Remove completed jobs
+                for job_id in jobs_to_remove:
+                    print(f"Cleaning up completed job {job_id} from {attr_name}")
+                    del site_jobs[job_id]
+                
+                # If we found a running job, no need to check other sites
                 if running_job_id:
                     break
                     
         print(f"Checked for running jobs on all sites: {running_job_id or 'None'}")
     
     return {"running_job_id": running_job_id, "site_id": site_id}
+    
+@router.get("/debug_job_status")
+async def debug_job_status(request: Request):
+    """Debug endpoint to show all job states"""
+    result = {}
+    
+    # Collect all site job dictionaries
+    for attr_name in dir(request.app.state):
+        if attr_name.startswith('running_jobs_'):
+            site_id = attr_name[13:]  # Extract site_id from attribute name
+            site_jobs = getattr(request.app.state, attr_name, {})
+            
+            # Convert to a serializable format
+            site_data = {}
+            for job_id, job in site_jobs.items():
+                # Convert any non-serializable values
+                job_data = {}
+                for key, value in job.items():
+                    if key == 'start_time' and hasattr(value, 'isoformat'):
+                        job_data[key] = value.isoformat()
+                    else:
+                        job_data[key] = str(value)
+                site_data[str(job_id)] = job_data
+                
+            result[site_id] = site_data
+    
+    return {"job_state": result}

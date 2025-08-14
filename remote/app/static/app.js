@@ -12,6 +12,14 @@ document.addEventListener('DOMContentLoaded', function() {
         disableAllJobSubmitButtons();
     }
     
+    // Set up the refresh jobs button
+    const refreshJobsBtn = document.getElementById('refresh-jobs-btn');
+    if (refreshJobsBtn) {
+        refreshJobsBtn.addEventListener('click', function() {
+            refreshJobData();
+        });
+    }
+    
     // Initialize job data
     const jobData = {};
     
@@ -786,4 +794,95 @@ function enableAllJobSubmitButtons() {
     // Clear the global flag
     window.jobIsRunning = false;
     console.log("Set window.jobIsRunning to false");
+}
+
+// Function to refresh job data without reloading the page
+function refreshJobData() {
+    console.log("Refreshing job data...");
+    
+    // Get the current site ID from the page
+    const siteElement = document.querySelector('.site-id');
+    const currentSiteId = siteElement?.textContent?.trim()?.split(':')[1]?.trim();
+    
+    // Show loading indicator on the button
+    const refreshBtn = document.getElementById('refresh-jobs-btn');
+    const originalBtnText = refreshBtn.textContent;
+    refreshBtn.textContent = '⟳ Loading...';
+    refreshBtn.disabled = true;
+    
+    // Construct the URL for fetching updated job data
+    const url = currentSiteId ? 
+        `/get_jobs?site_id=${currentSiteId}` : 
+        '/get_jobs';
+    
+    // Fetch updated job data
+    fetch(url)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error(`Failed to refresh data: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log("Refreshed job data:", data);
+            
+            // Update the job dropdown
+            const jobSelect = document.getElementById('job_id');
+            if (jobSelect) {
+                // Save the currently selected value
+                const currentlySelected = jobSelect.value;
+                
+                // Clear existing options
+                jobSelect.innerHTML = '<option value="">-- Select a job --</option>';
+                
+                // Add new options
+                data.forEach(job => {
+                    const option = document.createElement('option');
+                    option.value = job.id;
+                    option.textContent = `#${job.id} - ${job.name} (${job.algorithm})`;
+                    jobSelect.appendChild(option);
+                });
+                
+                // Try to restore the previously selected value if it still exists
+                if (currentlySelected) {
+                    const exists = Array.from(jobSelect.options).some(opt => opt.value === currentlySelected);
+                    if (exists) {
+                        jobSelect.value = currentlySelected;
+                    }
+                }
+                
+                // Update the hidden job data element
+                const jobDataElement = document.getElementById('job-data');
+                if (jobDataElement) {
+                    jobDataElement.textContent = JSON.stringify(data);
+                    
+                    // Parse job data for the form updates
+                    const jobData = {};
+                    data.forEach(job => {
+                        jobData[job.id] = job;
+                    });
+                    
+                    // Update form if a job is selected
+                    if (jobSelect.value) {
+                        updateJobForm(jobData);
+                    }
+                }
+            }
+            
+            // Reset the refresh button
+            refreshBtn.textContent = originalBtnText;
+            refreshBtn.disabled = false;
+        })
+        .catch(error => {
+            console.error("Error refreshing job data:", error);
+            
+            // Show error on the button temporarily
+            refreshBtn.textContent = '✗ Error';
+            
+            // Reset button after a delay
+            setTimeout(() => {
+                refreshBtn.textContent = originalBtnText;
+                refreshBtn.disabled = false;
+            }, 2000);
+        });
 }

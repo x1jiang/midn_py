@@ -208,6 +208,44 @@ document.addEventListener('DOMContentLoaded', () => {
           } else {
             statusIndicator.textContent = 'Completed';
             statusIndicator.className = 'status-running status-completed';
+            
+            console.log("Job completed, checking for imputed dataset:", data);
+            
+            // Only add the download link if there's an imputed dataset path available
+            if (data.imputed_dataset_path && !document.getElementById('download-results-btn')) {
+              console.log("Adding download button for imputed dataset:", data.imputed_dataset_path);
+              
+              const downloadButton = document.createElement('a');
+              downloadButton.id = 'download-results-btn';
+              downloadButton.href = `/api/jobs/${jobId}/download`;
+              downloadButton.className = 'btn-primary';
+              downloadButton.textContent = 'Download Results';
+              downloadButton.style.marginRight = '10px';
+              
+              // Insert button before the stop button
+              if (stopButton && stopButton.parentNode) {
+                stopButton.parentNode.insertBefore(downloadButton, stopButton);
+              }
+              
+              // Also add a message about the available download
+              const messageEl = document.createElement('div');
+              messageEl.className = 'job-status-line';
+              messageEl.innerHTML = '<strong>✓ Results ready:</strong> Click the "Download Results" button to download the imputed dataset.';
+              statusContainer.appendChild(messageEl);
+              statusContainer.scrollTop = statusContainer.scrollHeight;
+            } else if (!data.imputed_dataset_path) {
+              console.log("No imputed dataset available for this job");
+              
+              // Add a message explaining that no dataset is available
+              const messageEl = document.createElement('div');
+              messageEl.className = 'job-status-line';
+              messageEl.innerHTML = '<strong>ℹ️ Note:</strong> Job completed successfully, but no downloadable results are available yet.';
+              statusContainer.appendChild(messageEl);
+              statusContainer.scrollTop = statusContainer.scrollHeight;
+            }
+            
+            // Update job status in the job list if it exists on the page
+            updateJobStatusInTable(jobId, 'Completed');
           }
           
           // Disable stop button
@@ -393,6 +431,78 @@ document.addEventListener('DOMContentLoaded', () => {
     // Clear the global flag
     window.jobIsRunning = false;
     console.log("Set window.jobIsRunning to false");
+  }
+  
+  // Function to update job status in the jobs table
+  function updateJobStatusInTable(jobId, status) {
+    // Check if we're on the jobs page with a table
+    const jobsTable = document.querySelector('table.table');
+    if (!jobsTable) return;
+    
+    console.log(`Updating job ${jobId} status in table to ${status}`);
+    
+    // Find the row with the matching job ID
+    const rows = jobsTable.querySelectorAll('tbody tr');
+    for (const row of rows) {
+      const idCell = row.cells[0]; // Assuming ID is in the first column
+      if (idCell && idCell.textContent.trim() == jobId) {
+        console.log(`Found row for job ${jobId}`);
+        
+        // Find the status cell (5th column based on the template)
+        const statusCell = row.cells[4]; // Status is in the 5th column (0-based index is 4)
+        if (statusCell) {
+          statusCell.textContent = status;
+        }
+        
+        // Check for imputed dataset path
+        fetch(`/api/jobs/${jobId}`)
+          .then(response => {
+            if (!response.ok) {
+              throw new Error(`Failed to fetch job details: ${response.status}`);
+            }
+            return response.json();
+          })
+          .then(jobData => {
+            console.log(`Job ${jobId} details:`, jobData);
+            
+            // Check if there's a download button in the actions cell
+            const actionsCell = row.cells[6]; // Actions column (0-based index is 6)
+            if (actionsCell && jobData.imputed_dataset_path) {
+              console.log(`Job ${jobId} has imputed dataset path:`, jobData.imputed_dataset_path);
+              
+              // If there's no download button, add one
+              if (!actionsCell.querySelector('a[href*="/download"]')) {
+                const downloadLink = document.createElement('a');
+                downloadLink.href = `/api/jobs/${jobId}/download`;
+                downloadLink.className = 'button-link';
+                downloadLink.setAttribute('aria-label', `Download imputed dataset for job ${jobId}`);
+                
+                const downloadButton = document.createElement('button');
+                downloadButton.textContent = 'Download';
+                
+                downloadLink.appendChild(downloadButton);
+                
+                // Insert after the edit button
+                const editLink = actionsCell.querySelector('a[href*="/edit"]');
+                if (editLink) {
+                  editLink.insertAdjacentElement('afterend', downloadLink);
+                  // Add a space for better formatting
+                  editLink.insertAdjacentHTML('afterend', ' ');
+                } else {
+                  actionsCell.prepend(downloadLink);
+                }
+                
+                console.log(`Added download button for job ${jobId}`);
+              }
+            }
+          })
+          .catch(error => {
+            console.error(`Error fetching job ${jobId} details:`, error);
+          });
+          
+        break;
+      }
+    }
   }
   
   // Job form submission handling

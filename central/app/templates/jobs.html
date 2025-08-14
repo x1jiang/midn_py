@@ -46,6 +46,9 @@
             <td>{{ (j.participants or []) | length }}</td>
             <td>
               <a href="/gui/jobs/{{ j.id }}/edit" class="button-link" aria-label="Edit job {{ j.name }}"><button>Edit</button></a>
+              {% if j.imputed_dataset_path %}
+              <a href="/api/jobs/{{ j.id }}/download" class="button-link" aria-label="Download imputed dataset for job {{ j.name }}"><button>Download</button></a>
+              {% endif %}
               <form method="post" action="/gui/jobs/{{ j.id }}/delete" style="display:inline" onsubmit="return confirm('Delete job {{ j.id }}?')">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="submit" value="Delete" aria-label="Delete job {{ j.name }}">

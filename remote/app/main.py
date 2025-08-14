@@ -10,8 +10,10 @@ from jose import jwt
 from typing import Optional, Dict, Any
 
 from . import config
-from . import websockets
+from .services.algorithm_factory import AlgorithmClientFactory
 from .custom_templates import templates
+from . import services  # Ensure algorithm clients are registered
+import algorithms  # Ensure algorithm implementations are registered
 from .job_status import JobStatusCallback
 from .routes import jobs as jobs_routes
 
@@ -175,6 +177,29 @@ async def settings_post(request: Request,
             return RedirectResponse(url=f"/?site_index={i}", status_code=303)
     
     return RedirectResponse(url="/", status_code=303)
+
+@app.get("/get_jobs")
+async def get_jobs(site_id: Optional[str] = None):
+    """Endpoint that returns job data as JSON for AJAX requests"""
+    jobs = []
+    
+    # Use the provided site_id or fallback to the current site
+    site_id_to_use = site_id or config.settings.SITE_ID
+    
+    if site_id_to_use and site_id_to_use != "my_site_id" and config.settings.TOKEN and config.settings.TOKEN != "my_jwt_token":
+        try:
+            # Use HTTP URL for API calls
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{config.settings.HTTP_URL}/api/remote/jobs",
+                                    params={"site_id": site_id_to_use},
+                                    headers={"Authorization": f"Bearer {config.settings.TOKEN}"})
+                if r.status_code == 200:
+                    jobs = r.json()
+                    print(f"Successfully fetched {len(jobs)} jobs for site {site_id_to_use} via API")
+        except Exception as e:
+            print(f"Error fetching jobs via API: {e}")
+    
+    return jobs
 
 @app.get("/jobs", response_class=HTMLResponse)
 async def list_jobs(request: Request, refresh: bool = False, site_index: int = 0):
@@ -379,10 +404,11 @@ async def start_job(
             # Create a status callback with site ID
             status_callback = JobStatusCallback(app, job_id, config.settings.SITE_ID)
             
-            # Start SIMICE job with status updates
-            asyncio.create_task(websockets.run_simi_remote(  # Replace with SIMICE when implemented
-                D=df.values,
-                mvar=mvar_index,
+            # Start SIMICE job with status updates (using SIMI for now)
+            client = AlgorithmClientFactory.create_client("SIMI")
+            asyncio.create_task(client.run_algorithm(
+                data=df.values,
+                target_column=mvar_index,
                 job_id=job_id,
                 site_id=config.settings.SITE_ID,
                 central_url=config.settings.CENTRAL_URL,
@@ -399,9 +425,10 @@ async def start_job(
             status_callback = JobStatusCallback(app, job_id, config.settings.SITE_ID)
             
             # Start SIMI job with status updates
-            asyncio.create_task(websockets.run_simi_remote(
-                D=df.values,
-                mvar=mvar_index,
+            client = AlgorithmClientFactory.create_client("SIMI")
+            asyncio.create_task(client.run_algorithm(
+                data=df.values,
+                target_column=mvar_index,
                 job_id=job_id,
                 site_id=config.settings.SITE_ID,
                 central_url=config.settings.CENTRAL_URL,

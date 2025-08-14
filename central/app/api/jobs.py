@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 import json
 import os
@@ -52,3 +53,31 @@ def read_job(job_id: int, request: Request, db: Session = Depends(get_db)):
     if db_job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return db_job
+
+
+@router.get("/{job_id}/download")
+def download_imputed_dataset(job_id: int, request: Request, db: Session = Depends(get_db)):
+    """Download the imputed dataset for a job."""
+    require_admin(request)
+    db_job = services.job_service.get_job(db, job_id=job_id)
+    
+    if db_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if not db_job.imputed_dataset_path:
+        raise HTTPException(status_code=404, detail="No imputed dataset available for this job")
+    
+    # Construct the full path to the imputed dataset
+    file_path = os.path.join("central", "app", db_job.imputed_dataset_path)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Imputed dataset file not found")
+    
+    # Extract filename from path
+    filename = os.path.basename(file_path)
+    
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type='application/zip'
+    )
