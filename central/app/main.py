@@ -69,6 +69,203 @@ def test_job_check():
         # Ultra fallback
         return {"running_job_id": None, "critical_error": str(e)}
 
+# Debug endpoint to restart SIMICE iteration
+@app.get("/debug/restart-iteration/{job_id}")
+async def debug_restart_iteration(job_id: int):
+    try:
+        print(f"🔧 DEBUG: Starting restart for job {job_id}")
+        
+        from .services.algorithm_factory import AlgorithmServiceFactory
+        from .services.job_status import JobStatusTracker
+        
+        # Check if job is running
+        tracker = JobStatusTracker()
+        running_job_id = tracker.get_first_running_job_id()
+        print(f"🔧 DEBUG: Running job ID: {running_job_id}")
+        
+        if running_job_id != job_id:
+            return {"error": f"Job {job_id} is not currently running (running job: {running_job_id})"}
+        
+        # Get the algorithm service from the factory's cache
+        print(f"🔧 DEBUG: Available service instances: {list(AlgorithmServiceFactory._service_instances.keys())}")
+        
+        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
+            return {"error": "SIMICE service instance not found"}
+            
+        service = AlgorithmServiceFactory._service_instances["SIMICE"]
+        print(f"🔧 DEBUG: Got SIMICE service instance")
+        print(f"🔧 DEBUG: Available job data: {list(service.job_data.keys())}")
+        
+        if job_id not in service.job_data:
+            return {"error": f"Job {job_id} data not found in SIMICE service"}
+        
+        job_data = service.job_data[job_id]
+        print(f"🔧 DEBUG: Current job state - waiting_for_statistics: {job_data.get('waiting_for_statistics')}")
+        print(f"🔧 DEBUG: Current job state - waiting_for_updates: {job_data.get('waiting_for_updates')}")
+        print(f"🔧 DEBUG: Current job state - connected_sites: {job_data.get('connected_sites')}")
+        
+        # Clear the waiting states to reset the algorithm
+        job_data['waiting_for_statistics'] = set()
+        job_data['waiting_for_updates'] = set()
+        print(f"🔧 DEBUG: Cleared waiting states")
+        
+        # Force restart the current iteration
+        print(f"🔧 DEBUG: Calling _run_simice_iteration for job {job_id}")
+        try:
+            await service._run_simice_iteration(job_id)
+            print(f"🔧 DEBUG: _run_simice_iteration completed successfully")
+        except Exception as iter_error:
+            print(f"💥 DEBUG: Error in _run_simice_iteration: {iter_error}")
+            import traceback
+            traceback.print_exc()
+            return {"error": f"Error in iteration: {str(iter_error)}", "job_data": str(job_data)}
+        
+        return {"message": f"Restarted iteration for job {job_id}", "job_data": str(job_data)}
+        
+    except Exception as e:
+        print(f"💥 DEBUG ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+# Additional debug endpoint to directly send statistics requests
+@app.get("/debug/send-stats-request/{job_id}")
+async def debug_send_stats_request(job_id: int):
+    try:
+        print(f"🔧 DEBUG STATS: Starting stats request for job {job_id}")
+        
+        from .services.algorithm_factory import AlgorithmServiceFactory
+        from common.algorithm.protocol import create_message
+        
+        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
+            return {"error": "SIMICE service instance not found"}
+            
+        service = AlgorithmServiceFactory._service_instances["SIMICE"]
+        
+        if job_id not in service.job_data:
+            return {"error": f"Job {job_id} data not found"}
+        
+        job_data = service.job_data[job_id]
+        connected_sites = job_data.get('connected_sites', set())
+        target_column_indexes = job_data.get('target_column_indexes', [])
+        is_binary = job_data.get('is_binary', [])
+        
+        if not connected_sites:
+            return {"error": "No connected sites"}
+        
+        # Send statistics request for first target column
+        target_col_idx = target_column_indexes[0] - 1  # Convert to 0-based
+        method = "logistic" if is_binary[0] else "gaussian"
+        
+        print(f"🔧 DEBUG STATS: Sending stats request for column {target_col_idx} ({method})")
+        
+        results = []
+        for site_id in connected_sites:
+            try:
+                message = create_message(
+                    "compute_statistics",
+                    job_id=job_id,
+                    target_col_idx=target_col_idx,
+                    method=method
+                )
+                
+                print(f"📤 DEBUG STATS: Sending to site {site_id}: {message}")
+                await service.manager.send_to_site(message, site_id)
+                results.append(f"Sent to {site_id}: SUCCESS")
+                print(f"✅ DEBUG STATS: Successfully sent to site {site_id}")
+                
+            except Exception as send_error:
+                results.append(f"Sent to {site_id}: ERROR - {str(send_error)}")
+                print(f"💥 DEBUG STATS: Error sending to site {site_id}: {send_error}")
+        
+        # Update job state
+        job_data['waiting_for_statistics'] = set(connected_sites)
+        job_data['statistics'][f"{target_col_idx}_{method}"] = {}
+        
+        return {
+            "message": f"Sent statistics requests for job {job_id}",
+            "target_column": target_col_idx,
+            "method": method,
+            "results": results,
+            "connected_sites": list(connected_sites)
+        }
+        
+    except Exception as e:
+        print(f"💥 DEBUG STATS ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
+# Debug endpoint to directly send update_imputations messages
+@app.get("/debug/send-updates/{job_id}")
+async def debug_send_updates(job_id: int):
+    try:
+        print(f"🔧 DEBUG UPDATES: Starting updates for job {job_id}")
+        
+        from .services.algorithm_factory import AlgorithmServiceFactory
+        from common.algorithm.protocol import create_message
+        import numpy as np
+        
+        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
+            return {"error": "SIMICE service instance not found"}
+            
+        service = AlgorithmServiceFactory._service_instances["SIMICE"]
+        
+        if job_id not in service.job_data:
+            return {"error": f"Job {job_id} data not found"}
+        
+        job_data = service.job_data[job_id]
+        connected_sites = job_data.get('connected_sites', set())
+        target_column_indexes = job_data.get('target_column_indexes', [])
+        
+        if not connected_sites:
+            return {"error": "No connected sites"}
+        
+        # Send dummy update_imputations for first target column
+        target_col_idx = target_column_indexes[0] - 1  # Convert to 0-based
+        
+        print(f"🔧 DEBUG UPDATES: Sending updates for column {target_col_idx}")
+        
+        # Create dummy imputation values (random numbers for testing)
+        np.random.seed(42)  # For reproducible results
+        dummy_imputations = np.random.normal(0, 1, 100).tolist()  # 100 dummy values
+        
+        results = []
+        for site_id in connected_sites:
+            try:
+                message = create_message(
+                    "update_imputations",
+                    job_id=job_id,
+                    target_col_idx=target_col_idx,
+                    imputations=dummy_imputations[:50]  # Send 50 values per site
+                )
+                
+                print(f"📤 DEBUG UPDATES: Sending to site {site_id}: update_imputations with {len(dummy_imputations[:50])} values")
+                await service.manager.send_to_site(message, site_id)
+                results.append(f"Sent to {site_id}: SUCCESS")
+                print(f"✅ DEBUG UPDATES: Successfully sent to site {site_id}")
+                
+            except Exception as send_error:
+                results.append(f"Sent to {site_id}: ERROR - {str(send_error)}")
+                print(f"💥 DEBUG UPDATES: Error sending to site {site_id}: {send_error}")
+        
+        # Update job state
+        job_data['waiting_for_updates'] = set()  # Clear waiting state
+        
+        return {
+            "message": f"Sent update_imputations for job {job_id}",
+            "target_column": target_col_idx,
+            "results": results,
+            "connected_sites": list(connected_sites),
+            "imputation_count": len(dummy_imputations[:50])
+        }
+        
+    except Exception as e:
+        print(f"💥 DEBUG UPDATES ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
 
 manager = ConnectionManager()
 
@@ -500,28 +697,34 @@ async def gui_jobs_edit_post(request: Request, job_id: int,
 
     # Update parameters based on algorithm
     algo = (job.algorithm or '').upper()
+    # Make a copy of parameters to modify
+    params = dict(updated.parameters or {})
+    
     if algo == 'SIMI':
         try:
             idx = int(target_column_index) if target_column_index not in (None, "") else None
         except ValueError:
             return HTMLResponse("Target column index must be an integer", status_code=400)
         if idx is not None:
-            updated.parameters['target_column_index'] = idx
-        updated.parameters['is_binary'] = bool(is_binary)
+            params['target_column_index'] = idx
+        params['is_binary'] = bool(is_binary)
     elif algo == 'SIMICE':
         if target_column_indexes:
             try:
                 idxs = [int(x.strip()) for x in target_column_indexes.split(',') if x.strip()]
             except ValueError:
                 return HTMLResponse("Invalid indexes list", status_code=400)
-            updated.parameters['target_column_indexes'] = idxs
+            params['target_column_indexes'] = idxs
         if is_binary_list:
             bins = [s.strip().lower() in ('true','1','yes') for s in is_binary_list.split(',') if s.strip()]
-            updated.parameters['is_binary'] = bins
+            params['is_binary'] = bins
         if iteration_before_first_imputation is not None:
-            updated.parameters['iteration_before_first_imputation'] = iteration_before_first_imputation
+            params['iteration_before_first_imputation'] = iteration_before_first_imputation
         if iteration_between_imputations is not None:
-            updated.parameters['iteration_between_imputations'] = iteration_between_imputations
+            params['iteration_between_imputations'] = iteration_between_imputations
+    
+    # Reassign the entire dictionary to trigger SQLAlchemy change detection
+    updated.parameters = params
     db.add(updated)
     db.commit()
     db.refresh(updated)
@@ -564,6 +767,16 @@ async def websocket_endpoint(websocket: WebSocket, site_id: str, token: str = De
     # WebSocket remains JWT-guarded for remotes
     print(f"🔌 WebSocket: New connection from site {site_id}")
     print(f"🎫 WebSocket: Token validated for site {site_id}")
+    
+    # Check if there's a running job (for informational purposes)
+    from .services.job_status import JobStatusTracker
+    tracker = JobStatusTracker()
+    running_job_id = tracker.get_first_running_job_id()
+    
+    if running_job_id:
+        print(f"📋 WebSocket: Job {running_job_id} is currently running - allowing site {site_id} to connect")
+    else:
+        print(f"📋 WebSocket: No jobs currently running - site {site_id} will wait for jobs")
     
     await manager.connect(websocket, site_id)
     print(f"✅ WebSocket: Connection established for site {site_id}")

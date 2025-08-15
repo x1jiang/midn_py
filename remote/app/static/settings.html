@@ -90,10 +90,10 @@
 </head>
 <body>
   <header class="nav">
-    <a href="/">Home</a>
-    <a href="/jobs">Jobs</a>
+    <a href="/?site_index={{ active_site_index }}">Home</a>
+    <a href="/jobs?site_index={{ active_site_index }}">Jobs</a>
     <span class="site-indicator">Active Site: {{ active_site }}</span>
-    <a href="/settings" style="margin-left:auto">Settings</a>
+    <a href="/settings?site_index={{ active_site_index }}" style="margin-left:auto">Settings</a>
   </header>
   <main class="container">
     <div class="card">

@@ -88,9 +88,9 @@ class SIMIService(BaseAlgorithmService):
             self.job_status_tracker.fail_job(job_id, str(e))
             raise
     
-    async def handle_site_message(self, site_id: str, message_str: str) -> None:
+    async def _handle_site_message_impl(self, site_id: str, message_str: str) -> None:
         """
-        Handle a message from a remote site.
+        Implementation of site message handling for SIMI.
         
         Args:
             site_id: ID of the remote site
@@ -103,14 +103,59 @@ class SIMIService(BaseAlgorithmService):
         
         # Handle connect messages
         if message_type == "connect":
-            if job_id not in self.jobs:
+            # Check if there are no jobs available at all
+            if not self.jobs:
+                print(f"❌ SIMI: No jobs available for site {site_id}")
+                error_message = create_message(
+                    MessageType.ERROR,
+                    message="No SIMI jobs are currently running. Please try again later.",
+                    code="NO_JOBS_AVAILABLE"
+                )
+                await self.manager.send_to_site(error_message, site_id)
+                print(f"📤 SIMI: Sent 'no jobs available' error to site {site_id}")
                 return
-                
+            
+            # Check if the specific job exists
+            if not job_id:
+                print(f"❌ SIMI: No job_id provided by site {site_id}")
+                error_message = create_message(
+                    MessageType.ERROR,
+                    message="No job_id specified in connection request",
+                    code="MISSING_JOB_ID"
+                )
+                await self.manager.send_to_site(error_message, site_id)
+                print(f"📤 SIMI: Sent 'missing job_id' error to site {site_id}")
+                return
+            
+            if job_id not in self.jobs:
+                print(f"❌ SIMI: Job {job_id} not found for site {site_id}")
+                print(f"📋 SIMI: Available jobs: {list(self.jobs.keys())}")
+                error_message = create_message(
+                    MessageType.ERROR,
+                    message=f"Job {job_id} is not currently running or does not exist",
+                    code="JOB_NOT_FOUND",
+                    available_jobs=list(self.jobs.keys())
+                )
+                await self.manager.send_to_site(error_message, site_id)
+                print(f"📤 SIMI: Sent 'job not found' error to site {site_id}")
+                return
+            
             job = self.jobs[job_id]
             
             if site_id in job["participants"] and site_id not in job["connected_sites"]:
                 job["connected_sites"].append(site_id)
                 self.add_status_message(job_id, f"Site {site_id} connected ({len(job['connected_sites'])}/{len(job['participants'])} connected)")
+            elif site_id not in job["participants"]:
+                print(f"❌ SIMI: Site {site_id} not in participants list for job {job_id}")
+                print(f"📋 SIMI: Expected participants: {job['participants']}")
+                error_message = create_message(
+                    MessageType.ERROR,
+                    message=f"Site {site_id} is not authorized for job {job_id}",
+                    code="UNAUTHORIZED_SITE"
+                )
+                await self.manager.send_to_site(error_message, site_id)
+                print(f"📤 SIMI: Sent 'unauthorized site' error to site {site_id}")
+                return
             
             self.site_to_job[site_id] = job_id
             

@@ -27,8 +27,11 @@ class BaseAlgorithmClient(ABC):
         Args:
             algorithm_class: Algorithm class to use
         """
+        import uuid
+        self.client_id = str(uuid.uuid4())[:8]  # Short unique ID
         self.algorithm_class = algorithm_class
         self.algorithm_instance = None
+        print(f"🏭 Created new algorithm client {self.client_id} for {algorithm_class.__name__}")
     
     @abstractmethod
     async def run_algorithm(self, data: np.ndarray, target_column: int,

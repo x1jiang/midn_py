@@ -53,10 +53,54 @@ class BaseAlgorithmService(ABC):
         while not expected_participants.issubset(set(job_info["connected_sites"])):
             await asyncio.sleep(1)
     
-    @abstractmethod
     async def handle_site_message(self, site_id: str, message: str) -> None:
         """
         Handle a message from a remote site.
+        
+        Args:
+            site_id: ID of the remote site
+            message: Message content
+        """
+        try:
+            # Parse the message to check for job conflicts
+            message_data = parse_message(message)
+            message_type = message_data.get('type')
+            job_id = message_data.get('job_id')
+            
+            # Check for concurrent jobs if this is a connect message
+            if message_type == "connect":
+                # Check if there's already a running job
+                running_job_id = self.job_status_tracker.get_first_running_job_id()
+                if running_job_id and running_job_id != job_id:
+                    # There's a DIFFERENT job running, send error response
+                    error_message = create_message(
+                        MessageType.ERROR,
+                        message=f"Job {running_job_id} is already running. Please wait for completion.",
+                        code="JOB_CONFLICT"
+                    )
+                    await self.manager.send_to_site(error_message, site_id)
+                    print(f"❌ Rejected connection from {site_id}: Job {running_job_id} is already running (requested job {job_id})")
+                    return
+                elif running_job_id and running_job_id == job_id:
+                    # The SAME job is running, allow the connection (participant joining their job)
+                    print(f"✅ Allowing connection from {site_id}: joining their assigned job {job_id}")
+            
+            # Handle the message (to be implemented by subclasses)
+            await self._handle_site_message_impl(site_id, message)
+            
+        except Exception as e:
+            print(f"💥 Error handling message from site {site_id}: {e}")
+            # Send error response to the site
+            error_message = create_message(
+                MessageType.ERROR,
+                message=f"Error processing message: {str(e)}"
+            )
+            await self.manager.send_to_site(error_message, site_id)
+    
+    @abstractmethod
+    async def _handle_site_message_impl(self, site_id: str, message: str) -> None:
+        """
+        Implementation of site message handling (to be overridden by subclasses).
         
         Args:
             site_id: ID of the remote site

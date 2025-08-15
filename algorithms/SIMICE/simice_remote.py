@@ -8,12 +8,16 @@ import pandas as pd
 from typing import Dict, Any, List, Optional
 
 from common.algorithm.base import RemoteAlgorithm
+from ..core.least_squares import LS
+from ..core.logistic import Logit
+from ..core.transfer import package_gaussian_stats, package_logistic_stats
 
 
 class SIMICERemoteAlgorithm(RemoteAlgorithm):
     """
     Remote implementation of the SIMICE algorithm.
     Multiple Imputation using Chained Equations for multiple target columns.
+    Uses core statistical functions for R-compliant computations.
     """
     
     def __init__(self):
@@ -81,19 +85,43 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
         self.is_binary = is_binary
         self.original_data = data.copy()
         
-        # Create missing value masks
+        # Add intercept column like R reference: D = cbind(D,1)
+        data_with_intercept = np.column_stack([data, np.ones(data.shape[0])])
+        
+        # Create missing value masks for target columns only
         for col_idx in self.target_columns:
-            self.missing_masks[col_idx] = np.isnan(data[:, col_idx])
+            self.missing_masks[col_idx] = np.isnan(data_with_intercept[:, col_idx])
         
-        # Initialize data with simple imputation
-        self.current_data = self._initialize_data(data)
+        # Initialize data with simple imputation (following R reference)
+        self.current_data = self._initialize_data(data_with_intercept)
         
-        # Filter to complete cases for other variables (not target columns)
-        other_cols = [i for i in range(data.shape[1]) if i not in self.target_columns]
-        complete_case_mask = ~np.any(np.isnan(data[:, other_cols]), axis=1)
+        # Filter to complete cases for non-target variables (like R: idx = rowSums(miss[,-mvar]) == 0)
+        non_target_cols = [i for i in range(data_with_intercept.shape[1]) if i not in self.target_columns]
+        complete_case_mask = ~np.any(np.isnan(data_with_intercept[:, non_target_cols]), axis=1)
+        
+        # Apply complete case filter
+        self.current_data = self.current_data[complete_case_mask]
+        
+        # Update missing masks to reflect filtered data
+        for col_idx in self.target_columns:
+            original_missing = np.isnan(data_with_intercept[:, col_idx])
+            self.missing_masks[col_idx] = original_missing[complete_case_mask]
         
         # Prepare summary statistics for initial communication
         n_complete = np.sum(complete_case_mask)
+        n_total = data.shape[0]
+        
+        print(f"📊 SIMICE Remote: Prepared data - {n_total} total obs, {n_complete} complete cases")
+        print(f"🎯 SIMICE Remote: Target columns: {self.target_columns} (0-based)")
+        print(f"📈 SIMICE Remote: Data shape with intercept: {self.current_data.shape}")
+        
+        return {
+            "n_observations": n_total,
+            "n_complete_cases": n_complete,
+            "target_columns": target_column_indexes,  # Send back 1-based for consistency
+            "is_binary": is_binary,
+            "status": "initialized"
+        }
         n_total = data.shape[0]
         
         return {
@@ -107,6 +135,7 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
     async def compute_local_statistics(self, target_col_idx: int, method: str) -> Dict[str, Any]:
         """
         Compute local statistics for a specific target column.
+        Following R reference: X = matrix(DD[!miss[,yidx],-yidx],ncol=p-1)
         
         Args:
             target_col_idx: 0-based index of the target column
@@ -115,13 +144,16 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
         Returns:
             Local statistics for this target column
         """
-        # Get observations where this target column is not missing
+        if target_col_idx not in self.missing_masks:
+            return {"error": f"Target column {target_col_idx} not initialized"}
+        
+        # Get observations where this target column is not missing (like R: !miss[,yidx])
         missing_mask = self.missing_masks[target_col_idx]
         non_missing_mask = ~missing_mask
         
         if not non_missing_mask.any():
-            # No observations for this column
-            p = self.current_data.shape[1]  # Including intercept will be added
+            # No observations for this column - return zero statistics
+            p = self.current_data.shape[1] - 1  # Exclude target column
             if method.lower() == "gaussian":
                 return {
                     'XTX': np.zeros((p, p)),
@@ -137,14 +169,16 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
                     'method': method
                 }
         
-        # Prepare predictors (all columns except current target)
-        predictor_cols = [i for i in range(self.current_data.shape[1]) if i != target_col_idx]
-        X = self.current_data[non_missing_mask][:, predictor_cols]
-        # Add intercept
-        X = np.column_stack([X, np.ones(X.shape[0])])
+        # Prepare predictors: all columns except current target (like R: -yidx)
+        all_cols = list(range(self.current_data.shape[1]))
+        predictor_cols = [i for i in all_cols if i != target_col_idx]
         
-        # Get target values
+        # Get non-missing observations for this target column
+        X = self.current_data[non_missing_mask][:, predictor_cols]
         y = self.current_data[non_missing_mask, target_col_idx]
+        
+        print(f"🔢 SIMICE Statistics: Column {target_col_idx}, X shape: {X.shape}, y shape: {y.shape}")
+        print(f"   Non-missing observations: {np.sum(non_missing_mask)}/{len(missing_mask)}")
         
         if method.lower() == "gaussian":
             return await self._compute_gaussian_statistics(X, y)
@@ -153,18 +187,24 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
     
     async def _compute_gaussian_statistics(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
         """
-        Compute sufficient statistics for Gaussian regression following R implementation.
-        R code computes: XX (XTX), Xy (XTy), yy (yTy), n
+        Compute sufficient statistics for Gaussian regression using core LS function.
+        This now uses the centralized LS() function equivalent to R Core/LS.R
         """
-        XTX = X.T @ X
-        XTy = X.T @ y  
-        yTy = float(y.T @ y)  # Ensure scalar
+        # Use core LS function for R-compliant computation
+        ls_result = LS(X, y, lam=1e-3)
+        
+        # Extract the components needed for federated aggregation
+        # Following R pattern: compute XTX, XTy, yTy, n
+        XTX = X.T @ X  # We need raw statistics for aggregation
+        XTy = X.T @ y
+        yTy = float(y.T @ y)
         n = len(y)
         
-        print(f"🔢 SIMICE Gaussian: n={n}, XTX shape={XTX.shape}, XTy shape={XTy.shape}, yTy={yTy:.4f}")
+        print(f"🔢 SIMICE Gaussian (using core LS): n={n}, XTX shape={XTX.shape}, XTy shape={XTy.shape}, yTy={yTy:.4f}")
+        print(f"🎯 SIMICE Gaussian: Core LS computed beta=[{', '.join(f'{x:.3f}' for x in ls_result['beta'][:3])}...]")
         
         return {
-            'XTX': XTX.tolist(),  # Convert to list for JSON serialization
+            'XTX': XTX.tolist(),  # Raw statistics for central aggregation
             'XTy': XTy.tolist(),
             'yTy': yTy,
             'n': n,
@@ -173,79 +213,44 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
     
     async def _compute_logistic_statistics(self, X: np.ndarray, y: np.ndarray) -> Dict[str, Any]:
         """
-        Compute statistics for logistic regression following R Newton-Raphson implementation.
-        R code implements full Newton-Raphson with proper Hessian computation.
+        Compute statistics for logistic regression using core Logit function.
+        This now uses the centralized Logit() function equivalent to R Core/Logit.R
         """
-        p = X.shape[1]
-        beta = np.zeros(p)
-        max_iter = 25  # From R implementation
-        tol = 1e-6
+        n, p = X.shape
         
-        print(f"🔄 SIMICE Logistic: Starting Newton-Raphson, n={len(y)}, p={p}")
+        # Use core Logit function for R-compliant Newton-Raphson computation
+        logit_result = Logit(X, y, lam=1e-3, maxiter=25)
         
-        for iteration in range(max_iter):
-            try:
-                # Compute linear combination  
-                eta = X @ beta
-                
-                # Compute probabilities with numerical stability
-                eta_clipped = np.clip(eta, -500, 500)
-                mu = 1 / (1 + np.exp(-eta_clipped))
-                
-                # Compute weights (variance of Bernoulli)
-                w = mu * (1 - mu)
-                w = np.maximum(w, 1e-8)  # Avoid division by zero
-                
-                # Compute Hessian (X^T W X)
-                W_diag = np.diag(w)
-                H = X.T @ W_diag @ X
-                
-                # Compute gradient (score vector)
-                residual = y - mu
-                g = X.T @ residual
-                
-                # Add regularization to ensure invertibility
-                lam = 1e-6
-                H_reg = H + lam * np.eye(p)
-                
-                # Newton-Raphson update
-                delta = np.linalg.solve(H_reg, g)
-                beta_new = beta + delta
-                
-                # Check convergence
-                if np.linalg.norm(delta) < tol:
-                    print(f"✅ SIMICE Logistic: Converged at iteration {iteration + 1}")
-                    beta = beta_new
-                    break
-                    
-                beta = beta_new
-                
-            except np.linalg.LinAlgError as e:
-                print(f"⚠️ SIMICE Logistic: Numerical error at iteration {iteration}: {e}")
-                break
+        # Extract converged parameters
+        beta = logit_result['beta']
+        converged = logit_result['converged']
+        iterations = logit_result['iterations']
         
-        # Compute final Hessian and gradient for transmission
-        try:
-            eta = X @ beta
-            eta_clipped = np.clip(eta, -500, 500)
-            mu = 1 / (1 + np.exp(-eta_clipped))
-            w = mu * (1 - mu)
-            w = np.maximum(w, 1e-8)
-            W_diag = np.diag(w)
-            H_final = X.T @ W_diag @ X
-            # Compute gradient for central aggregation
-            residual = y - mu
-            g_final = X.T @ residual
-        except:
-            H_final = np.eye(p)  # Fallback to identity
-            g_final = np.zeros(p)  # Fallback to zero gradient
-            
-        print(f"🔢 SIMICE Logistic: Final beta shape={beta.shape}, H shape={H_final.shape}")
+        # Compute final Hessian and gradient at converged beta for federated aggregation
+        # This matches the R implementation's approach
+        xb = X @ beta
+        xb = np.clip(xb, -500, 500)
+        pr = 1 / (1 + np.exp(-xb))
+        w = pr * (1 - pr)
+        w = np.maximum(w, 1e-8)
+        
+        # Final Hessian and gradient (what central needs for aggregation)
+        H = X.T @ (X * w[:, np.newaxis]) + n * 1e-3 * np.eye(p)  # Include regularization
+        g = X.T @ (y - pr)
+        
+        # Compute log-likelihood for monitoring
+        log_lik = np.sum(y * xb - np.log(1 + np.exp(xb)))
+        
+        print(f"🔄 SIMICE Logistic (using core Logit): Converged={converged} after {iterations} iterations")
+        print(f"🔢 SIMICE Logistic: n={n}, p={p}, log_lik={log_lik:.4f}")
+        print(f"🎯 SIMICE Logistic: Core Logit beta=[{', '.join(f'{x:.3f}' for x in beta[:3])}...]")
+        print(f"🔢 SIMICE Logistic: H shape={H.shape}, g shape={g.shape}")
         
         return {
-            'H': H_final.tolist(),  # Hessian matrix for aggregation
-            'g': g_final.tolist(),  # Gradient vector for aggregation  
-            'n': len(y),
+            'H': H.tolist(),      # Hessian matrix for aggregation
+            'g': g.tolist(),      # Gradient vector for aggregation  
+            'n': n,               # Sample size
+            'log_lik': float(log_lik),  # Log-likelihood for monitoring
             'method': 'logistic'
         }
     
@@ -312,10 +317,11 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
     async def update_imputations(self, target_col_idx: int, global_parameters: Dict[str, Any]) -> Dict[str, Any]:
         """
         Update local imputations using global parameters.
+        Following R reference: X = matrix(DD[midx,-yidx],ncol=p-1)
         
         Args:
             target_col_idx: 0-based index of the target column
-            global_parameters: Global parameters computed from aggregated statistics
+            global_parameters: Global parameters (should contain coefficients and method)
             
         Returns:
             Status information
@@ -328,44 +334,58 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
         
         missing_mask = self.missing_masks[target_col_idx]
         method = global_parameters.get("method", "gaussian")
-        beta = np.array(global_parameters.get("beta", []))
         
         if not missing_mask.any():
             print(f"ℹ️ SIMICE Remote: No missing values in column {target_col_idx}")
             return {"status": "completed", "message": "No missing values to impute"}
         
-        # Prepare predictors (all columns except current target)
-        predictor_cols = [i for i in range(self.current_data.shape[1]) if i != target_col_idx]
-        X_missing = self.current_data[missing_mask][:, predictor_cols]
+        # Get indices of missing values (like R: midx = which(miss[,yidx]))
+        missing_indices = np.where(missing_mask)[0]
         
-        # Add intercept
-        X_missing = np.column_stack([X_missing, np.ones(X_missing.shape[0])])
+        # Prepare predictors for missing observations: all columns except current target (like R: -yidx)
+        all_cols = list(range(self.current_data.shape[1]))
+        predictor_cols = [i for i in all_cols if i != target_col_idx]
+        
+        # Get predictor data for missing observations (like R: DD[midx,-yidx])
+        X_missing = self.current_data[missing_indices][:, predictor_cols]
+        
+        print(f"🔢 SIMICE Imputation: Missing indices: {len(missing_indices)}, X shape: {X_missing.shape}")
         
         # Generate new imputations using global parameters
         if method.lower() == "gaussian":
-            # For Gaussian: y = X*beta + noise
+            # For Gaussian: D[midx,j] = D[midx,-j] %*% alpha + rnorm(nmidx,0,sig)
+            beta = np.array(global_parameters.get("beta", []))
+            sigma = global_parameters.get("sigma", 0.1)
+            
+            if len(beta) != X_missing.shape[1]:
+                print(f"💥 SIMICE: Beta dimension mismatch. Expected {X_missing.shape[1]}, got {len(beta)}")
+                return {"status": "error", "message": f"Beta dimension mismatch"}
+            
             predictions = X_missing @ beta
-            # Add some noise (simplified)
-            noise = np.random.normal(0, 0.1, predictions.shape)
+            noise = np.random.normal(0, sigma, predictions.shape)
             new_values = predictions + noise
             
         else:  # logistic
-            # For logistic: p = sigmoid(X*beta)
-            logits = X_missing @ beta
-            probabilities = 1 / (1 + np.exp(-np.clip(logits, -500, 500)))  # Clip to prevent overflow
+            # For logistic: pr = 1 / (1 + exp(-D[midx,-j] %*% alpha)); D[midx,j] = rbinom(nmidx,1,pr)
+            alpha = np.array(global_parameters.get("alpha", []))
             
-            # Sample from Bernoulli distribution
+            if len(alpha) != X_missing.shape[1]:
+                print(f"💥 SIMICE: Alpha dimension mismatch. Expected {X_missing.shape[1]}, got {len(alpha)}")
+                return {"status": "error", "message": f"Alpha dimension mismatch"}
+            
+            logits = X_missing @ alpha
+            probabilities = 1 / (1 + np.exp(-np.clip(logits, -500, 500)))  # Clip to prevent overflow
             new_values = np.random.binomial(1, probabilities).astype(float)
         
         # Update the current data with new imputations
-        self.current_data[missing_mask, target_col_idx] = new_values
+        self.current_data[missing_indices, target_col_idx] = new_values
         
-        print(f"✅ SIMICE Remote: Updated {np.sum(missing_mask)} missing values in column {target_col_idx}")
+        print(f"✅ SIMICE Remote: Updated {len(missing_indices)} missing values in column {target_col_idx}")
         print(f"   Method: {method}, Mean imputed value: {np.mean(new_values):.4f}")
         
         return {
             "status": "completed",
-            "n_imputed": int(np.sum(missing_mask)),
+            "n_imputed": len(missing_indices),
             "mean_value": float(np.mean(new_values)),
             "method": method
         }

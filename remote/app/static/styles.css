@@ -142,6 +142,11 @@ input,select{padding:8px;border:1px solid #cbd5e1;border-radius:6px;margin:6px 0
     background-color: #dc2626;
 }
 
+.status-indicator.waiting {
+    background-color: #f59e0b;
+    color: #1f2937;
+}
+
 .status-indicator.round-complete {
     background-color: #2563eb;
 }
@@ -172,6 +177,16 @@ input,select{padding:8px;border:1px solid #cbd5e1;border-radius:6px;margin:6px 0
     white-space: pre-wrap;
     word-break: break-word;
     padding: 2px 0;
+}
+
+.job-status-line.error {
+    color: #dc2626;
+    background-color: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 4px;
+    padding: 8px;
+    margin: 8px 0;
+    font-weight: 500;
 }
 
 .status-actions {

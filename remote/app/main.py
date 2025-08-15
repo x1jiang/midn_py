@@ -22,9 +22,6 @@ app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="remote/app/static"), name="static")
 
-# Initialize the running_jobs state
-app.state.running_jobs = {}
-
 # Include job status routes
 app.include_router(jobs_routes.router)
 
@@ -61,29 +58,30 @@ async def read_root(request: Request, refresh: bool = False, site_index: int = 0
     site_info = None
     message = None
     
-    # Set the site based on the index parameter
+    # Determine the active site without modifying the sites list
+    active_site = None
     if 0 <= site_index < len(config.settings.sites):
-        # Temporarily change the sites order to make the selected site first
-        if site_index > 0:
-            selected_site = config.settings.sites.pop(site_index)
-            config.settings.sites.insert(0, selected_site)
+        active_site = config.settings.sites[site_index]
+    else:
+        # Default to first site if index is invalid
+        active_site = config.settings.sites[0] if config.settings.sites else None
     
-    # If site_id is configured and config file exists, fetch available jobs
-    if config.settings.SITE_ID and config.settings.SITE_ID != "my_site_id" and config.settings.TOKEN and config.settings.TOKEN != "my_jwt_token":
+    # If active site is configured and has valid credentials, fetch available jobs
+    if active_site and active_site.SITE_ID and active_site.SITE_ID != "my_site_id" and active_site.TOKEN and active_site.TOKEN != "my_jwt_token":
         try:
             # Use HTTP URL for API calls
             async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(f"{config.settings.HTTP_URL}/api/remote/jobs",
-                                    params={"site_id": config.settings.SITE_ID},
-                                    headers={"Authorization": f"Bearer {config.settings.TOKEN}"})
+                r = await client.get(f"{active_site.HTTP_URL}/api/remote/jobs",
+                                    params={"site_id": active_site.SITE_ID},
+                                    headers={"Authorization": f"Bearer {active_site.TOKEN}"})
                 if r.status_code == 200:
                     jobs = r.json()
-                    print(f"Successfully fetched {len(jobs)} jobs for site {config.settings.SITE_ID}")
+                    print(f"Successfully fetched {len(jobs)} jobs for site {active_site.SITE_ID}")
                     if refresh:
                         message = f"Data refreshed successfully. Found {len(jobs)} jobs assigned to this site."
                     
                     # Only try to get site information if jobs API call succeeds (token is valid)
-                    site_info = await get_site_info(config.settings.SITE_ID)
+                    site_info = await get_site_info(active_site.SITE_ID)
                 else:
                     print(f"Failed to fetch jobs: HTTP {r.status_code}")
                     if refresh:
@@ -104,29 +102,39 @@ async def read_root(request: Request, refresh: bool = False, site_index: int = 0
         site_name = site_info.get("name")
         institution = site_info.get("institution")
     
-    current_site_name = config.settings.current_site.name if config.settings.current_site else "Default Site"
+    active_site_name = active_site.name if active_site else "Default Site"
     
     return templates.TemplateResponse("index.html", {
         "request": request, 
-        "settings": config.settings,
+        "settings": active_site if active_site else config.settings,  # Use active site settings
         "sites": config.settings.sites,
-        "active_site": current_site_name,
+        "active_site": active_site_name,
+        "active_site_index": site_index,  # Pass the current site index
         "jobs": jobs, 
         "site_name": site_name or "Site Not Authenticated",
         "institution": institution or "",
-        "token_expiry": _token_expiry_str(config.settings.TOKEN),
+        "token_expiry": _token_expiry_str(active_site.TOKEN if active_site else None),
         "message": message
     })
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_get(request: Request):
-    current_site_name = config.settings.current_site.name if config.settings.current_site else "Default Site"
+async def settings_get(request: Request, site_index: int = 0):
+    # Determine the active site without modifying the sites list
+    active_site = None
+    if 0 <= site_index < len(config.settings.sites):
+        active_site = config.settings.sites[site_index]
+    else:
+        # Default to first site if index is invalid
+        active_site = config.settings.sites[0] if config.settings.sites else None
+    
+    active_site_name = active_site.name if active_site else "Default Site"
     return templates.TemplateResponse("settings.html", {
         "request": request, 
-        "settings": config.settings, 
+        "settings": active_site if active_site else config.settings, 
         "sites": config.settings.sites,
-        "active_site": current_site_name,
-        "token_expiry": _token_expiry_str(config.settings.TOKEN)
+        "active_site": active_site_name,
+        "active_site_index": site_index,
+        "token_expiry": _token_expiry_str(active_site.TOKEN if active_site else None)
     })
 
 @app.post("/settings", response_class=HTMLResponse)
@@ -180,20 +188,28 @@ async def settings_post(request: Request,
     return RedirectResponse(url="/", status_code=303)
 
 @app.get("/get_jobs")
-async def get_jobs(site_id: Optional[str] = None):
+async def get_jobs(site_id: Optional[str] = None, site_index: int = 0):
     """Endpoint that returns job data as JSON for AJAX requests"""
     jobs = []
     
-    # Use the provided site_id or fallback to the current site
-    site_id_to_use = site_id or config.settings.SITE_ID
+    # Determine the active site
+    active_site = None
+    if 0 <= site_index < len(config.settings.sites):
+        active_site = config.settings.sites[site_index]
+    else:
+        # Default to first site if index is invalid
+        active_site = config.settings.sites[0] if config.settings.sites else None
     
-    if site_id_to_use and site_id_to_use != "my_site_id" and config.settings.TOKEN and config.settings.TOKEN != "my_jwt_token":
+    # Use provided site_id, or get it from the active site
+    site_id_to_use = site_id or (active_site.SITE_ID if active_site else None)
+    
+    if active_site and site_id_to_use and site_id_to_use != "my_site_id" and active_site.TOKEN and active_site.TOKEN != "my_jwt_token":
         try:
             # Use HTTP URL for API calls
             async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(f"{config.settings.HTTP_URL}/api/remote/jobs",
+                r = await client.get(f"{active_site.HTTP_URL}/api/remote/jobs",
                                     params={"site_id": site_id_to_use},
-                                    headers={"Authorization": f"Bearer {config.settings.TOKEN}"})
+                                    headers={"Authorization": f"Bearer {active_site.TOKEN}"})
                 if r.status_code == 200:
                     jobs = r.json()
                     print(f"Successfully fetched {len(jobs)} jobs for site {site_id_to_use} via API")
@@ -208,32 +224,35 @@ async def list_jobs(request: Request, refresh: bool = False, site_index: int = 0
     site_info = None
     message = None
     
-    # Set the site based on the index parameter
+    # Determine the active site without modifying the sites list
+    active_site = None
     if 0 <= site_index < len(config.settings.sites):
-        # Temporarily change the sites order to make the selected site first
-        if site_index > 0:
-            selected_site = config.settings.sites.pop(site_index)
-            config.settings.sites.insert(0, selected_site)
+        active_site = config.settings.sites[site_index]
+    else:
+        # Default to first site if index is invalid
+        active_site = config.settings.sites[0] if config.settings.sites else None
     
-    try:
-        central_url = f"{config.settings.CENTRAL_URL.replace('ws://','http://').replace('wss://','https://')}"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{central_url}/api/remote/jobs",
-                                params={"site_id": config.settings.SITE_ID},
-                                headers={"Authorization": f"Bearer {config.settings.TOKEN}"})
-            if r.status_code == 200:
-                jobs = r.json()
-                if refresh:
-                    message = f"Data refreshed successfully. Found {len(jobs)} assigned jobs."
-                
-                # Only try to get site information if jobs API call succeeds (token is valid)
-                site_info = await get_site_info(config.settings.SITE_ID)
-            elif refresh:
-                message = f"Failed to refresh data. Server returned status code {r.status_code}."
-    except Exception as e:
-        print(f"Error fetching jobs: {e}")
-        if refresh:
-            message = f"Error refreshing data: {str(e)}"
+    if not active_site:
+        message = "No site configuration available."
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{active_site.HTTP_URL}/api/remote/jobs",
+                                    params={"site_id": active_site.SITE_ID},
+                                    headers={"Authorization": f"Bearer {active_site.TOKEN}"})
+                if r.status_code == 200:
+                    jobs = r.json()
+                    if refresh:
+                        message = f"Data refreshed successfully. Found {len(jobs)} assigned jobs."
+                    
+                    # Only try to get site information if jobs API call succeeds (token is valid)
+                    site_info = await get_site_info(active_site.SITE_ID)
+                elif refresh:
+                    message = f"Failed to refresh data. Server returned status code {r.status_code}."
+        except Exception as e:
+            print(f"Error fetching jobs: {e}")
+            if refresh:
+                message = f"Error refreshing data: {str(e)}"
     
     site_name = None
     institution = None
@@ -242,17 +261,18 @@ async def list_jobs(request: Request, refresh: bool = False, site_index: int = 0
         site_name = site_info.get("name")
         institution = site_info.get("institution")
     
-    current_site_name = config.settings.current_site.name if config.settings.current_site else "Default Site"
+    active_site_name = active_site.name if active_site else "Default Site"
     
     return templates.TemplateResponse("jobs.html", {
         "request": request, 
         "jobs": jobs, 
-        "settings": config.settings,
+        "settings": active_site if active_site else config.settings,
         "sites": config.settings.sites,
-        "active_site": current_site_name, 
+        "active_site": active_site_name,
+        "active_site_index": site_index,
         "site_name": site_name or "Site Not Authenticated",
         "institution": institution or "",
-        "token_expiry": _token_expiry_str(config.settings.TOKEN),
+        "token_expiry": _token_expiry_str(active_site.TOKEN if active_site else None),
         "message": message
     })
 
@@ -274,6 +294,65 @@ def has_running_jobs(app, site_id=None):
                 break
     return running_jobs
 
+@app.get("/debug/all_jobs")
+async def debug_all_jobs(request: Request):
+    """Debug endpoint to show all jobs across all sites"""
+    result = {
+        'app_state_attributes': [attr for attr in dir(request.app.state) if not attr.startswith('_')],
+        'running_jobs_attributes': [],
+        'sites': {}
+    }
+    
+    # Instead of using dir(), try to access known site IDs from config
+    for site in config.settings.sites:
+        site_id = site.SITE_ID
+        site_jobs_attr = f'running_jobs_{site_id}'
+        
+        # Check if this site has any jobs
+        if hasattr(request.app.state, site_jobs_attr):
+            result['running_jobs_attributes'].append(site_jobs_attr)
+            site_jobs = getattr(request.app.state, site_jobs_attr, {})
+            result['sites'][site_id] = {
+                'attribute_name': site_jobs_attr,
+                'job_count': len(site_jobs),
+                'jobs': {job_id: {
+                    'status': job.get('status', 'Unknown'),
+                    'completed': job.get('completed', False),
+                    'start_time': str(job.get('start_time', 'Unknown'))
+                } for job_id, job in site_jobs.items()}
+            }
+        else:
+            result['sites'][site_id] = {
+                'attribute_name': site_jobs_attr,
+                'job_count': 0,
+                'jobs': {}
+            }
+    
+    return result
+
+@app.get("/debug/app_state")
+async def debug_app_state(request: Request):
+    """Debug endpoint to show raw app state"""
+    # Test if app.state works at all
+    if not hasattr(request.app.state, 'test_attribute'):
+        request.app.state.test_attribute = "app.state is working"
+    
+    state_dict = {}
+    for attr_name in dir(request.app.state):
+        if not attr_name.startswith('_'):
+            attr_value = getattr(request.app.state, attr_name)
+            if hasattr(attr_value, '__dict__'):
+                state_dict[attr_name] = str(attr_value)
+            elif isinstance(attr_value, (dict, list, str, int, float, bool)):
+                state_dict[attr_name] = attr_value
+            else:
+                state_dict[attr_name] = str(type(attr_value))
+    return {
+        'state_attributes': state_dict,
+        'total_attributes': len([attr for attr in dir(request.app.state) if not attr.startswith('_')]),
+        'app_state_type': str(type(request.app.state))
+    }
+
 @app.post("/start_job")
 async def start_job(
     request: Request,
@@ -286,22 +365,31 @@ async def start_job(
     site_index: Optional[int] = Form(0),
     current_site_id: Optional[str] = Form(None)
 ):
-    print(f"Starting job: ID={job_id}, Type={job_type}, Missing var={mvar}, Site index={site_index}")
+    print(f"🚀 START_JOB CALLED: ID={job_id}, Type={job_type}, Missing var={mvar}, Site index={site_index}")
+    print(f"🚀 Request type: {type(request)}")
+    print(f"🚀 App instance: {id(request.app)}")
     
-    # Set the site based on the index parameter to ensure correct site ID and token are used
+    # Get the active site without modifying the sites list
+    active_site = None
     if 0 <= site_index < len(config.settings.sites):
-        # Temporarily change the sites order to make the selected site first
-        if site_index > 0:
-            selected_site = config.settings.sites.pop(site_index)
-            config.settings.sites.insert(0, selected_site)
-            print(f"Using site configuration: {config.settings.current_site.name}, ID={config.settings.SITE_ID}")
+        active_site = config.settings.sites[site_index]
+    else:
+        # Default to first site if index is invalid
+        active_site = config.settings.sites[0] if config.settings.sites else None
+        
+    if not active_site:
+        error_message = "No site configuration available."
+        print(f"Error starting job: {error_message}")
+        return {"error": error_message}
+        
+    print(f"Using site configuration: {active_site.name}, ID={active_site.SITE_ID}")
             
     # Verify that current site ID matches the expected site ID
-    if current_site_id and current_site_id != config.settings.SITE_ID:
-        print(f"Warning: Current site ID from form ({current_site_id}) doesn't match active site ID ({config.settings.SITE_ID})")
+    if current_site_id and current_site_id != active_site.SITE_ID:
+        print(f"Warning: Current site ID from form ({current_site_id}) doesn't match active site ID ({active_site.SITE_ID})")
     
     # Check for running jobs - if any job is running, block starting a new one
-    if has_running_jobs(app, config.settings.SITE_ID):
+    if has_running_jobs(app, active_site.SITE_ID):
         error_message = "A job is already running on this site. Please wait for it to complete or stop it before starting a new job."
         print(f"Error starting job: {error_message}")
         
@@ -336,9 +424,9 @@ async def start_job(
     job_details = None
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{config.settings.CENTRAL_URL.replace('ws://','http://').replace('wss://','https://')}/api/remote/jobs",
-                                params={"site_id": config.settings.SITE_ID},
-                                headers={"Authorization": f"Bearer {config.settings.TOKEN}"})
+            r = await client.get(f"{active_site.HTTP_URL}/api/remote/jobs",
+                                params={"site_id": active_site.SITE_ID},
+                                headers={"Authorization": f"Bearer {active_site.TOKEN}"})
             if r.status_code == 200:
                 jobs = r.json()
                 for job in jobs:
@@ -399,7 +487,7 @@ async def start_job(
                 extra_params["iteration_between_imputations"] = int(iteration_between_imputations)
             
             # Debug info about current site configuration
-            print(f"Starting SIMICE job with site ID: {config.settings.SITE_ID}, site name: {config.settings.current_site.name}")
+            print(f"Starting SIMICE job with site ID: {active_site.SITE_ID}, site name: {active_site.name}")
             print(f"Extra params: {extra_params}")
             
             # Get target columns and binary flags from job parameters
@@ -410,7 +498,7 @@ async def start_job(
             print(f"SIMICE binary flags: {is_binary_list}")
             
             # Create a status callback with site ID
-            status_callback = JobStatusCallback(app, job_id, config.settings.SITE_ID)
+            status_callback = JobStatusCallback(request.app, job_id, active_site.SITE_ID)
             
             # Start SIMICE job with correct client
             client = AlgorithmClientFactory.create_client("SIMICE")
@@ -418,9 +506,9 @@ async def start_job(
                 data=df.values,
                 target_column=target_column_indexes[0] - 1,  # Convert first column to 0-based for compatibility
                 job_id=job_id,
-                site_id=config.settings.SITE_ID,
-                central_url=config.settings.CENTRAL_URL,
-                token=config.settings.TOKEN,
+                site_id=active_site.SITE_ID,
+                central_url=active_site.CENTRAL_URL,
+                token=active_site.TOKEN,
                 extra_params=extra_params,
                 status_callback=status_callback,
                 target_column_indexes=target_column_indexes,  # Pass as kwarg
@@ -429,10 +517,10 @@ async def start_job(
         else:
             # Default to SIMI algorithm
             print(f"Starting SIMI job (is_binary={is_binary})")
-            print(f"Using site ID: {config.settings.SITE_ID}, site name: {config.settings.current_site.name}")
+            print(f"Using site ID: {active_site.SITE_ID}, site name: {active_site.name}")
             
             # Create a status callback with site ID
-            status_callback = JobStatusCallback(app, job_id, config.settings.SITE_ID)
+            status_callback = JobStatusCallback(request.app, job_id, active_site.SITE_ID)
             
             # Start SIMI job with status updates
             client = AlgorithmClientFactory.create_client("SIMI")
@@ -440,33 +528,58 @@ async def start_job(
                 data=df.values,
                 target_column=mvar_index,
                 job_id=job_id,
-                site_id=config.settings.SITE_ID,
-                central_url=config.settings.CENTRAL_URL,
-                token=config.settings.TOKEN,
+                site_id=active_site.SITE_ID,
+                central_url=active_site.CENTRAL_URL,
+                token=active_site.TOKEN,
                 is_binary=is_binary,  # Pass the binary flag
                 status_callback=status_callback
             ))
         
         print("Job started successfully")
         
+        # DEBUG: Check request.app.state before job registration
+        print(f"🐛 DEBUG: request.app.state type: {type(request.app.state)}")
+        print(f"🐛 DEBUG: request.app.state attributes before: {[attr for attr in dir(request.app.state) if not attr.startswith('_')]}")
+        print(f"🐛 DEBUG: request.app instance ID: {id(request.app)}")
+        
         # Get or create site-specific job dictionary
-        site_jobs_attr = f'running_jobs_{config.settings.SITE_ID}'
-        if not hasattr(app.state, site_jobs_attr):
-            setattr(app.state, site_jobs_attr, {})
+        site_jobs_attr = f'running_jobs_{active_site.SITE_ID}'
+        print(f"🐛 DEBUG: Creating attribute: {site_jobs_attr}")
+        
+        if not hasattr(request.app.state, site_jobs_attr):
+            setattr(request.app.state, site_jobs_attr, {})
+            print(f"🏠 Created new job dictionary for site {active_site.SITE_ID}")
+        else:
+            print(f"🏠 Using existing job dictionary for site {active_site.SITE_ID}")
+        
+        # Verify the attribute was created
+        print(f"🐛 DEBUG: hasattr check: {hasattr(request.app.state, site_jobs_attr)}")
+        print(f"🐛 DEBUG: request.app.state attributes after: {[attr for attr in dir(request.app.state) if not attr.startswith('_')]}")
         
         # Track the running job in the site-specific state
-        site_jobs = getattr(app.state, site_jobs_attr)
+        site_jobs = getattr(request.app.state, site_jobs_attr)
+        print(f"🐛 DEBUG: Retrieved site_jobs: {type(site_jobs)} with {len(site_jobs)} existing jobs")
         site_jobs[job_id] = {
             'status': 'Running',
             'messages': ['Job started successfully'],
             'start_time': datetime.now(),
             'completed': False,
-            'site_id': config.settings.SITE_ID  # Store site ID with the job
+            'site_id': active_site.SITE_ID  # Store site ID with the job
         }
         
-        # Log for debugging
-        print(f"Job {job_id} registered in app state for site {config.settings.SITE_ID}")
-        print(f"Jobs for this site: {list(site_jobs.keys())}")
+        # Log for debugging job isolation
+        print(f"🔄 Job {job_id} registered in request.app.state for site {active_site.SITE_ID}")
+        print(f"📊 Jobs for this site: {list(site_jobs.keys())}")
+        
+        # Check all known sites for running job dictionaries
+        all_running_jobs = []
+        for site in config.settings.sites:
+            check_attr = f'running_jobs_{site.SITE_ID}'
+            if hasattr(request.app.state, check_attr):
+                jobs_dict = getattr(request.app.state, check_attr)
+                if jobs_dict:  # Only include if has jobs
+                    all_running_jobs.append(f"{check_attr}({len(jobs_dict)} jobs)")
+        print(f"🏘️ All active job dictionaries: {all_running_jobs}")
         
         if is_ajax:
             return {"success": True, "job_id": job_id}

@@ -71,52 +71,121 @@ class SIMIClient(BaseAlgorithmClient):
         if extra_params:
             connect_message.update(extra_params)
         
-        # Main connection loop
+        # Main connection loop - implementing the required communication pattern
         while not client.is_job_stopped():
             # Try to connect
             success, websocket = await client.connect()
             if not success:
-                # Wait before retrying
+                # Connection failed - could mean central is not ready or job already running
+                await client.send_status(f"Connection failed, will retry in {client.retry_delay} seconds...")
                 await asyncio.sleep(client.retry_delay)
                 continue
             
             try:
+                # Connection successful - now try to start the job
+                await client.send_status("Connected to central server, attempting to start job...")
+                
                 # Send connect message
                 if not await client.send_message(websocket, MessageType.CONNECT, **connect_message):
-                    # Connection error, retry
+                    # Connection error during send, retry
+                    await client.send_status("Failed to send connection message, reconnecting...")
                     continue
                 
-                # Wait for method instruction from central
+                # Wait for response from central
                 message = await client.receive_message(websocket)
-                if not message or message.get("type") != "method":
-                    # Invalid response, retry
+                if not message:
+                    await client.send_status("No response from central, reconnecting...")
                     continue
+                
+                message_type = message.get("type")
+                
+                # Check if central rejected us due to various reasons
+                if message_type == "error" or message_type == "job_conflict":
+                    error_msg = message.get("message", "Job conflict or central busy")
+                    error_code = message.get("code", "UNKNOWN")
+                    await client.send_status(f"Central server error: {error_msg} (Code: {error_code})")
+                    
+                    # Different wait times based on error type
+                    if error_code == "NO_JOBS_AVAILABLE":
+                        # No jobs available - use normal retry delay (15 seconds)
+                        await client.send_status(f"No jobs available. Waiting {client.retry_delay} seconds before retry...")
+                        await asyncio.sleep(client.retry_delay)
+                    elif error_code in ["JOB_NOT_FOUND", "MISSING_JOB_ID", "UNAUTHORIZED_SITE"]:
+                        # These are configuration errors - wait longer before retry  
+                        await client.send_status(f"Configuration issue. Waiting {client.completion_wait_time} seconds before retry...")
+                        await asyncio.sleep(client.completion_wait_time)
+                    else:
+                        # Default case - assume job conflict, wait for completion
+                        await client.send_status(f"Job conflict or other issue. Waiting {client.completion_wait_time} seconds...")
+                        await asyncio.sleep(client.completion_wait_time)
+                    continue
+                
+                if message_type != "method":
+                    # Unexpected response, retry
+                    await client.send_status(f"Unexpected response: {message_type}, reconnecting...")
+                    continue
+                
+                # Successfully connected and received method instruction
+                await client.send_status("Successfully connected! Job starting...")
                 
                 # Process the method message
                 method = message.get("method", "gaussian").lower()
                 await self.process_method_message(method)
+                
+                # Mark that we have an established connection for this job
+                job_active = True
                 
                 # Handle the rest of the protocol based on the method
                 if self.method == "gaussian":
                     # For Gaussian, just send the stats
                     ls_stats = await self.algorithm_instance.process_message("method", {"method": self.method})
                     if not await client.send_message(websocket, MessageType.DATA, **ls_stats):
+                        await client.send_status("Failed to send data, job may have failed")
+                        job_active = False
                         continue
                         
-                    # Wait for completion or timeout
-                    await asyncio.sleep(30)
+                    # Wait for completion signal or timeout
+                    await client.send_status("Data sent, waiting for job completion...")
+                    completion_timeout = 300  # 5 minutes for job completion
+                    start_wait = asyncio.get_event_loop().time()
+                    
+                    while job_active and (asyncio.get_event_loop().time() - start_wait) < completion_timeout:
+                        try:
+                            # Check for completion message
+                            completion_msg = await asyncio.wait_for(
+                                client.receive_message(websocket), 
+                                timeout=10  # Short timeout for checking
+                            )
+                            if completion_msg and completion_msg.get("type") == "job_complete":
+                                await client.send_status("Job completed successfully!")
+                                job_active = False
+                                break
+                        except asyncio.TimeoutError:
+                            # No message yet, keep waiting
+                            pass
+                        except Exception:
+                            # Connection lost or other error
+                            job_active = False
+                            break
+                    
+                    if job_active:
+                        # Timeout waiting for completion
+                        await client.send_status("Timeout waiting for job completion")
                     
                 else:  # Logistic
                     # First send initial sample size
                     if not await client.send_message(websocket, "n", **initial_data):
+                        await client.send_status("Failed to send initial data, reconnecting...")
+                        job_active = False
                         continue
                     
                     # Then handle iterations from central
-                    while True:
+                    while job_active:
                         try:
                             message = await client.receive_message(websocket)
                             if not message:
-                                await client.send_status("Failed to receive message, reconnecting...")
+                                await client.send_status("Failed to receive message, connection may be lost")
+                                job_active = False
                                 break
                                 
                             message_type = message.get("type")
@@ -124,20 +193,19 @@ class SIMIClient(BaseAlgorithmClient):
                             if message_type == "mode":
                                 mode = message.get("mode", 0)
                                 
-                                # Mode 0 means termination
+                                # Mode 0 means termination - job completed
                                 if mode == 0:
-                                    await client.send_status("Received termination signal from central")
+                                    await client.send_status("Received job completion signal from central")
+                                    job_active = False
                                     break
                                 
                                 # Process this iteration
                                 await client.send_status(f"Processing iteration {mode}...")
                                 
-                                # Add debug information
-                                await client.send_status(f"Message payload: {message}")
-                                
                                 # Make sure we have the beta parameter in the payload
                                 if "beta" not in message:
                                     await client.send_error("Missing 'beta' parameter in mode message")
+                                    job_active = False
                                     break
                                 
                                 # Explicitly ensure the algorithm instance has the correct method set
@@ -149,9 +217,6 @@ class SIMIClient(BaseAlgorithmClient):
                                 # Process the message
                                 results = await self.algorithm_instance.process_message("mode", message)
                                 
-                                # Add debug output for the results
-                                await client.send_status(f"Algorithm returned: {results}")
-                                
                                 # Different handling based on mode
                                 if mode == 2 and "nQ" in results:
                                     # Mode 2 expects only nQ (line search)
@@ -162,6 +227,7 @@ class SIMIClient(BaseAlgorithmClient):
                                     await client.send_status(f"Sending Q value: {results['nQ']} for line search")
                                     if not await client.send_message(websocket, "Q", **payload):
                                         await client.send_error(f"Failed to send Q data")
+                                        job_active = False
                                         break
                                     else:
                                         await client.send_status(f"Sent Q data successfully for line search")
@@ -171,6 +237,8 @@ class SIMIClient(BaseAlgorithmClient):
                                     missing_keys = [k for k in ["H", "g", "Q"] if k not in results]
                                     if missing_keys:
                                         await client.send_error(f"Missing expected keys in results: {missing_keys}")
+                                        job_active = False
+                                        break
                                     
                                     # Send H, g, Q separately
                                     await client.send_status(f"Sending results for iteration {mode}...")
@@ -181,6 +249,7 @@ class SIMIClient(BaseAlgorithmClient):
                                         await client.send_status(f"Sending H matrix of size {len(results['H'])}x{len(results['H'][0]) if len(results['H']) > 0 else 0}")
                                         if not await client.send_message(websocket, "H", **payload):
                                             await client.send_error(f"Failed to send H data")
+                                            job_active = False
                                             break
                                         else:
                                             await client.send_status(f"Sent H data successfully")
@@ -191,6 +260,7 @@ class SIMIClient(BaseAlgorithmClient):
                                         await client.send_status(f"Sending g vector of size {len(results['g'])}")
                                         if not await client.send_message(websocket, "g", **payload):
                                             await client.send_error(f"Failed to send g data")
+                                            job_active = False
                                             break
                                         else:
                                             await client.send_status(f"Sent g data successfully")
@@ -201,18 +271,46 @@ class SIMIClient(BaseAlgorithmClient):
                                         await client.send_status(f"Sending Q value: {results['Q']}")
                                         if not await client.send_message(websocket, "Q", **payload):
                                             await client.send_error(f"Failed to send Q data")
+                                            job_active = False
                                             break
                                         else:
                                             await client.send_status(f"Sent Q data successfully")
+                                            
+                            elif message_type == "error":
+                                error_msg = message.get("message", "Unknown error from central")
+                                await client.send_status(f"Central server error: {error_msg}")
+                                job_active = False
+                                break
+                                
                         except Exception as e:
                             await client.send_status(f"Error processing message: {str(e)}")
+                            job_active = False
                             break
                 
+                # If we reach here, the job has completed (successfully or with error)
+                if job_active:
+                    await client.send_status("Job completed successfully!")
+                
+                # Mark job as completed and wait before next attempt
+                client.mark_job_completed()
+                await client.send_status(f"Job finished. Waiting {client.completion_wait_time} seconds before checking for new jobs...")
+                await asyncio.sleep(client.completion_wait_time)
+                
+                # Reset for potential new job
+                client.reset_for_new_job()
+                
             except Exception as e:
-                await client.send_status(f"Error: {str(e)}")
-            
-            # Wait before next connection attempt
-            await asyncio.sleep(client.retry_delay)
+                await client.send_status(f"Unexpected error: {str(e)}")
+                # Connection lost or other error - wait and retry
+                client.is_connection_established = False
+                
+                # Wait 2 minutes if we had an established connection (job may have been running)
+                if client.is_connection_established:
+                    await client.send_status("Connection lost during job execution. Waiting for central to complete...")
+                    await asyncio.sleep(client.completion_wait_time)
+                else:
+                    # Quick retry if we never established connection
+                    await asyncio.sleep(client.retry_delay)
     
     async def handle_message(self, message_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """

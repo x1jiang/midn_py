@@ -32,8 +32,8 @@ async def get_job_status(request: Request, job_id: int, site_id: str = None):
             "site_id": job_status.get('site_id', '')
         }
     else:
-        # Log a more detailed message for debugging
-        print(f"Job status request for job_id={job_id}, site_id={site_id} - Job not found")
+        # Job not found in memory - this indicates service restart or crash
+        print(f"Job status request for job_id={job_id}, site_id={site_id} - Job not found (likely service restart)")
         if site_id:
             print(f"Looking in site_jobs_{site_id} dictionary")
             # Check what jobs are available for this site
@@ -41,8 +41,13 @@ async def get_job_status(request: Request, job_id: int, site_id: str = None):
             site_jobs = getattr(request.app.state, site_jobs_attr, {})
             print(f"Available jobs for site {site_id}: {list(site_jobs.keys())}")
         
-        # Still return the not found status
-        return {"status": "Job not found", "completed": True}
+        # Return job as failed due to service restart/crash
+        return {
+            "status": "Job failed: Service was restarted or crashed. Please start a new job.",
+            "completed": True,
+            "error": True,  # Indicate this is an error state
+            "site_id": site_id or ''
+        }
 
 @router.post("/stop_job")
 async def stop_job(request: Request, job_id: int, site_id: str = None):

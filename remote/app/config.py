@@ -17,45 +17,43 @@ class Settings:
     def __init__(self):
         self.sites = []
         
-    @property
-    def current_site(self):
-        return self.sites[0] if self.sites else None
-        
+    # Remove current_site property - always use explicit site selection
+    # Keep backwards compatibility properties that reference the first site
     @property
     def CENTRAL_URL(self):
-        return self.current_site.CENTRAL_URL if self.current_site else "ws://127.0.0.1:8000"
+        return self.sites[0].CENTRAL_URL if self.sites else "ws://127.0.0.1:8000"
     
     @CENTRAL_URL.setter
     def CENTRAL_URL(self, value):
-        if self.current_site:
-            self.current_site.CENTRAL_URL = value
+        if self.sites:
+            self.sites[0].CENTRAL_URL = value
     
     @property
     def HTTP_URL(self):
-        return self.current_site.HTTP_URL if self.current_site else "http://127.0.0.1:8000"
+        return self.sites[0].HTTP_URL if self.sites else "http://127.0.0.1:8000"
     
     @HTTP_URL.setter
     def HTTP_URL(self, value):
-        if self.current_site:
-            self.current_site.HTTP_URL = value
+        if self.sites:
+            self.sites[0].HTTP_URL = value
     
     @property
     def SITE_ID(self):
-        return self.current_site.SITE_ID if self.current_site else "my_site_id"
+        return self.sites[0].SITE_ID if self.sites else "my_site_id"
     
     @SITE_ID.setter
     def SITE_ID(self, value):
-        if self.current_site:
-            self.current_site.SITE_ID = value
+        if self.sites:
+            self.sites[0].SITE_ID = value
     
     @property
     def TOKEN(self):
-        return self.current_site.TOKEN if self.current_site else "my_jwt_token"
+        return self.sites[0].TOKEN if self.sites else "my_jwt_token"
     
     @TOKEN.setter
     def TOKEN(self, value):
-        if self.current_site:
-            self.current_site.TOKEN = value
+        if self.sites:
+            self.sites[0].TOKEN = value
 
 def save_settings(settings):
     """Save settings to a local JSON file for persistence"""

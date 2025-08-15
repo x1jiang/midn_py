@@ -1,5 +1,21 @@
 // This file contains JavaScript code for the remote site
 
+// Helper function to get current site_index from URL
+function getCurrentSiteIndex() {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get('site_index') || '0';
+}
+
+// Helper function to add site_index to URL
+function addSiteIndexToUrl(url) {
+    const siteIndex = getCurrentSiteIndex();
+    if (url.includes('?')) {
+        return url + '&site_index=' + siteIndex;
+    } else {
+        return url + '?site_index=' + siteIndex;
+    }
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     // Initialize global job running state
     window.jobIsRunning = false;
@@ -95,7 +111,8 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (currentSiteId) {
                 // Double-check for running jobs right before submission
-                fetch(`/check_running_jobs?site_id=${currentSiteId}`)
+                const checkUrl = addSiteIndexToUrl(`/check_running_jobs?site_id=${currentSiteId}`);
+                fetch(checkUrl)
                     .then(response => response.json())
                     .then(data => {
                         if (data.running_job_id) {
@@ -374,16 +391,10 @@ function submitJobForm(form) {
         return;
     }
     
-    // Get the current site index from the dropdown
-    const siteSelect = document.getElementById('site-select');
-    if (siteSelect) {
-        formData.append('site_index', siteSelect.value);
-        console.log("Added site_index to form submission:", siteSelect.value);
-    } else {
-        // If site select doesn't exist, default to 0
-        formData.append('site_index', '0');
-        console.log("No site-select found, defaulting site_index to 0");
-    }
+    // Get the current site index from URL parameters instead of dropdown
+    const currentSiteIndex = getCurrentSiteIndex();
+    formData.append('site_index', currentSiteIndex);
+    console.log("Added site_index to form submission:", currentSiteIndex);
     
     // Check if CSV file is included
     if (!formData.get('csv_file') || formData.get('csv_file').size === 0) {
@@ -542,8 +553,35 @@ function startJobMonitoring(jobId) {
                 jobStatusContainer.dataset.jobId = data.job_id;
             }
             
-            // If job not found, retry a few times before showing the error
-            if (data.status === "Job not found" && !isCompleted) {
+            // If job not found or has error flag, check if it's due to service restart
+            if ((data.status === "Job not found" || data.error) && !isCompleted) {
+                console.log(`Job ${jobId} lost due to service restart for site ${currentSiteId || 'unknown'}`);
+                
+                // Show service restart error immediately
+                isCompleted = true;
+                
+                // Clear existing messages and show restart error
+                statusContainer.innerHTML = '';
+                const messageEl = document.createElement('div');
+                messageEl.className = 'job-status-line error';
+                messageEl.textContent = data.status || "Job failed: Service was restarted or crashed. Please start a new job.";
+                statusContainer.appendChild(messageEl);
+                
+                // Set status to failed
+                statusIndicator.textContent = 'Failed';
+                statusIndicator.className = 'status-indicator failed';
+                
+                // Clean up and re-enable controls
+                stopButton.disabled = true;
+                stopButton.classList.add('hidden');
+                clearInterval(pollingInterval);
+                enableAllJobSubmitButtons();
+                
+                return;
+            }
+
+            // If job not found but no error flag, retry a few times before showing error
+            if (data.status === "Job not found" && !data.error && !isCompleted) {
                 console.log(`Job ${jobId} not found for site ${currentSiteId || 'unknown'}, will retry...`);
                 return; // Don't update UI, just wait for next polling cycle
             }
@@ -573,7 +611,16 @@ function startJobMonitoring(jobId) {
             // Update status indicator based on job completion
             if (data.completed) {
                 isCompleted = true;
-                if (data.status && (data.status.toLowerCase().includes('error') || data.status.toLowerCase().includes('failed'))) {
+                
+                // Check if this is a real failure or just a retry situation
+                const isRealFailure = data.status && (
+                    (data.status.toLowerCase().includes('error') || data.status.toLowerCase().includes('failed')) &&
+                    !data.status.toLowerCase().includes('waiting for jobs') &&
+                    !data.status.toLowerCase().includes('no jobs are currently running') &&
+                    !data.status.toLowerCase().includes('no jobs available')
+                );
+                
+                if (isRealFailure) {
                     statusIndicator.textContent = 'Failed';
                     statusIndicator.className = 'status-indicator failed';
                 } else {
@@ -594,8 +641,21 @@ function startJobMonitoring(jobId) {
                 statusIndicator.className = 'status-indicator round-complete';
                 console.log('Round completed, but job continues running');
             } else {
-                statusIndicator.textContent = 'Running';
-                statusIndicator.className = 'status-indicator';
+                // Check if we're in a waiting/retry state
+                const isWaitingState = data.status && (
+                    data.status.toLowerCase().includes('waiting for jobs') ||
+                    data.status.toLowerCase().includes('no jobs are currently running') ||
+                    data.status.toLowerCase().includes('no jobs available') ||
+                    data.status.toLowerCase().includes('waiting') && data.status.toLowerCase().includes('retry')
+                );
+                
+                if (isWaitingState) {
+                    statusIndicator.textContent = 'Waiting for Jobs';
+                    statusIndicator.className = 'status-indicator waiting';
+                } else {
+                    statusIndicator.textContent = 'Running';
+                    statusIndicator.className = 'status-indicator';
+                }
             }
         } catch (error) {
             console.error('Error fetching job status:', error);
@@ -810,10 +870,11 @@ function refreshJobData() {
     refreshBtn.textContent = '⟳ Loading...';
     refreshBtn.disabled = true;
     
-    // Construct the URL for fetching updated job data
-    const url = currentSiteId ? 
+    // Construct the URL for fetching updated job data, preserving site_index
+    const baseUrl = currentSiteId ? 
         `/get_jobs?site_id=${currentSiteId}` : 
         '/get_jobs';
+    const url = addSiteIndexToUrl(baseUrl);
     
     // Fetch updated job data
     fetch(url)

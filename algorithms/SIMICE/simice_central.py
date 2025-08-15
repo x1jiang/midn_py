@@ -168,6 +168,9 @@ class SIMICECentralAlgorithm(CentralAlgorithm):
         self.iteration_between_imputations = iteration_between_imputations
         self.imputation_count = imputation_count
         
+        # Initialize storage for imputed datasets
+        self.imp_list = []
+        
         # Create missing value masks
         for col_idx in self.target_columns:
             col_name = data.columns[col_idx]
@@ -228,6 +231,8 @@ class SIMICECentralAlgorithm(CentralAlgorithm):
             
             # Store this completed imputation
             imp_list.append(current_data.copy())
+            # Also store in instance variable for later access
+            self.imp_list.append(current_data.copy())
         
         return imp_list
     

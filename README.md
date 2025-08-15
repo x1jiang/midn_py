@@ -196,6 +196,33 @@ Use `is_binary: true` and binary target data (0/1):
 ## Project layout
 - central/app/main.py: Central FastAPI app and WebSocket endpoint
 - central/app/services/simi_service.py: SIMI orchestration (Gaussian + Logistic)
+- central/app/services/simice_service.py: SIMICE orchestration (Multiple Imputation with Chained Equations)
 - remote/app/main.py: Remote FastAPI app + simple UI
 - remote/app/websockets.py: Remote WebSocket client using SIMI remote module
-- algorithms/SIMI: Uploaded SIMI modules and params schema
+- algorithms/SIMI: SIMI algorithm modules and params schema
+- algorithms/SIMICE: SIMICE algorithm modules and params schema
+- algorithms/R_Reference: Reference R implementations for validation
+- common/core: Core statistical functions (Python equivalents of R Core/)
+  - least_squares.py: LS(), SILSNet(), ImputeLS() - federated least squares
+  - logistic.py: Logit(), SILogitNet(), ImputeLogit() - federated logistic regression
+  - transfer.py: Serialization utilities for matrix/vector transmission
+
+## Core Functions
+The system now includes centralized statistical functions matching the R reference implementation:
+
+### Least Squares (common/core/least_squares.py)
+- `LS(X, y, offset, lam)`: Basic regularized least squares
+- `SILSNet(D, idx, yidx, lam, remote_stats)`: Federated least squares aggregation
+- `ImputeLS(yidx, beta, sig, manager, participants)`: Broadcast Gaussian imputation parameters
+
+### Logistic Regression (common/core/logistic.py)  
+- `Logit(X, y, offset, beta0, lam, maxiter)`: Newton-Raphson logistic with line search
+- `SILogitNet(D, idx, yidx, remote_stats)`: Federated logistic regression aggregation
+- `ImputeLogit(yidx, alpha, manager, participants)`: Broadcast logistic imputation parameters
+
+### Data Transfer (common/core/transfer.py)
+- `serialize_matrix/deserialize_matrix`: Network-safe matrix transmission
+- `serialize_vector/deserialize_vector`: Network-safe vector transmission  
+- `package_gaussian_stats/package_logistic_stats`: Ready-to-send statistics packages
+
+These core functions ensure mathematical consistency with the R reference implementations.

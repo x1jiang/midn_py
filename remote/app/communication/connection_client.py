@@ -19,9 +19,10 @@ class ConnectionClient:
     
     def __init__(self, central_url: str, site_id: str, token: str, 
                  status_callback: Optional[Any] = None,
-                 retry_delay: int = 5,
+                 retry_delay: int = 15,  # Changed from 5 to 15 seconds
                  connect_timeout: int = 10,
-                 message_timeout: int = 5):
+                 message_timeout: int = 5,
+                 completion_wait_time: int = 120):  # 2 minutes wait after completion
         """
         Initialize connection client.
         
@@ -30,9 +31,10 @@ class ConnectionClient:
             site_id: ID of this site
             token: Authentication token
             status_callback: Callback for status updates
-            retry_delay: Delay between retry attempts (seconds)
+            retry_delay: Delay between retry attempts (seconds) - 15s when no job running
             connect_timeout: Timeout for connection attempts (seconds)
             message_timeout: Timeout for message sending/receiving (seconds)
+            completion_wait_time: Time to wait after job completion before reconnecting (seconds)
         """
         self.central_url = central_url
         self.site_id = site_id
@@ -41,8 +43,11 @@ class ConnectionClient:
         self.retry_delay = retry_delay
         self.connect_timeout = connect_timeout
         self.message_timeout = message_timeout
+        self.completion_wait_time = completion_wait_time
         self.websocket = None
         self.attempt_count = 0
+        self.is_connection_established = False
+        self.job_completed = False
     
     def get_uri(self) -> str:
         """
@@ -114,6 +119,7 @@ class ConnectionClient:
             )
             
             await self.send_status("Connection established")
+            self.is_connection_established = True
             return True, websocket
             
         except Exception as e:
@@ -121,10 +127,14 @@ class ConnectionClient:
             error_message = str(e)
             if isinstance(e, websockets.exceptions.InvalidStatusCode):
                 error_message = f"Server returned invalid status code: {str(e)}"
+                # Check if this indicates a job already running
+                if "403" in str(e) or "409" in str(e):
+                    await self.send_status("Central server indicates a job is already running")
+                    return False, None
             elif isinstance(e, websockets.exceptions.ConnectionClosed):
                 error_message = f"Connection closed unexpectedly: {str(e)}"
             elif isinstance(e, asyncio.TimeoutError):
-                error_message = "Connection timed out"
+                error_message = "Connection timed out - central server may not be ready"
             elif "Timeout" in str(e):
                 error_message = f"Operation timed out: {str(e)}"
             
@@ -132,6 +142,7 @@ class ConnectionClient:
             print(f"Connection error (attempt #{self.attempt_count}): {error_message}")
             await self.send_status(f"Connection error: {error_message}")
             
+            self.is_connection_established = False
             return False, None
     
     async def send_message(self, websocket: websockets.WebSocketClientProtocol, 
@@ -185,4 +196,16 @@ class ConnectionClient:
             
         except Exception as e:
             await self.send_status(f"Error receiving message: {str(e)}")
+            self.is_connection_established = False
             return None
+    
+    def mark_job_completed(self) -> None:
+        """Mark that the current job has completed."""
+        self.job_completed = True
+        self.is_connection_established = False
+    
+    def reset_for_new_job(self) -> None:
+        """Reset state for a new job attempt."""
+        self.job_completed = False
+        self.attempt_count = 0
+        self.is_connection_established = False
