@@ -1,15 +1,18 @@
 """
-SIMI service implementation for central site.
+SIMI service implementation for central site using standardized job protocol.
 """
 
 import asyncio
+import datetime
 import json
 import numpy as np
+import os
 import pandas as pd
+import zipfile
 from typing import Dict, Any, List, Set, Optional
 
-from common.algorithm.protocol import create_message, parse_message, MessageType
-from .base_algorithm_service import BaseAlgorithmService
+from common.algorithm.job_protocol import create_message, parse_message, ProtocolMessageType
+from .federated_job_protocol_service import FederatedJobProtocolService
 from .. import models
 from ..websockets.connection_manager import ConnectionManager
 
@@ -17,9 +20,10 @@ from ..websockets.connection_manager import ConnectionManager
 from algorithms.SIMI.simi_central import SIMICentralAlgorithm
 
 
-class SIMIService(BaseAlgorithmService):
+class SIMIService(FederatedJobProtocolService):
     """
     Service for the SIMI algorithm on the central site.
+    Uses standardized federated job protocol.
     """
     
     def __init__(self, manager: ConnectionManager):
@@ -55,19 +59,18 @@ class SIMIService(BaseAlgorithmService):
             
         method = "logistic" if is_binary else "gaussian"
         
-        # Initialize job state
-        self.jobs[job_id] = {
-            "status": "starting",
-            "participants": list(set(db_job.participants or [])),
-            "connected_sites": [],
-            "data": {},  # Data from remotes
+        # Initialize job state using protocol service
+        await self.initialize_job_state(job_id, db_job)
+        
+        # Add SIMI-specific state
+        self.jobs[job_id].update({
             "central_data": central_data,
             "missing_spec": db_job.missing_spec or {},
             "method": method,
-            # For logistic regression iterations
+            "data": {},  # Data from remotes
             "logit_buffers": {},
             "logit_event": None,
-        }
+        })
         
         job_status.add_message(f"Using {method} method for imputation")
         job_status.add_message(f"Waiting for participants to connect: {', '.join(self.jobs[job_id]['participants'])}")
@@ -75,6 +78,9 @@ class SIMIService(BaseAlgorithmService):
         try:
             # Wait for all participants to connect
             await self.wait_for_participants(job_id)
+            
+            # Update job status to active once all participants are connected
+            self.jobs[job_id]["status"] = "active"
             
             # Start the imputation process
             await self.run_imputation(job_id, db_job)
@@ -88,106 +94,42 @@ class SIMIService(BaseAlgorithmService):
             self.job_status_tracker.fail_job(job_id, str(e))
             raise
     
-    async def _handle_site_message_impl(self, site_id: str, message_str: str) -> None:
+    async def _handle_algorithm_message(self, site_id: str, job_id: int, message_type: str, data: Dict[str, Any]) -> None:
         """
-        Implementation of site message handling for SIMI.
+        Handle algorithm-specific messages for SIMI.
         
         Args:
             site_id: ID of the remote site
-            message_str: Message content as string
+            job_id: ID of the job
+            message_type: Type of the message
+            data: Message data
         """
-        # Parse the message
-        data = json.loads(message_str)
-        job_id = data.get("job_id")
-        message_type = data.get("type")
-        
-        # Handle connect messages
-        if message_type == "connect":
-            # Check if there are no jobs available at all
-            if not self.jobs:
-                print(f"❌ SIMI: No jobs available for site {site_id}")
-                error_message = create_message(
-                    MessageType.ERROR,
-                    message="No SIMI jobs are currently running. Please try again later.",
-                    code="NO_JOBS_AVAILABLE"
-                )
-                await self.manager.send_to_site(error_message, site_id)
-                print(f"📤 SIMI: Sent 'no jobs available' error to site {site_id}")
-                return
-            
-            # Check if the specific job exists
-            if not job_id:
-                print(f"❌ SIMI: No job_id provided by site {site_id}")
-                error_message = create_message(
-                    MessageType.ERROR,
-                    message="No job_id specified in connection request",
-                    code="MISSING_JOB_ID"
-                )
-                await self.manager.send_to_site(error_message, site_id)
-                print(f"📤 SIMI: Sent 'missing job_id' error to site {site_id}")
-                return
-            
-            if job_id not in self.jobs:
-                print(f"❌ SIMI: Job {job_id} not found for site {site_id}")
-                print(f"📋 SIMI: Available jobs: {list(self.jobs.keys())}")
-                error_message = create_message(
-                    MessageType.ERROR,
-                    message=f"Job {job_id} is not currently running or does not exist",
-                    code="JOB_NOT_FOUND",
-                    available_jobs=list(self.jobs.keys())
-                )
-                await self.manager.send_to_site(error_message, site_id)
-                print(f"📤 SIMI: Sent 'job not found' error to site {site_id}")
-                return
-            
-            job = self.jobs[job_id]
-            
-            if site_id in job["participants"] and site_id not in job["connected_sites"]:
-                job["connected_sites"].append(site_id)
-                self.add_status_message(job_id, f"Site {site_id} connected ({len(job['connected_sites'])}/{len(job['participants'])} connected)")
-            elif site_id not in job["participants"]:
-                print(f"❌ SIMI: Site {site_id} not in participants list for job {job_id}")
-                print(f"📋 SIMI: Expected participants: {job['participants']}")
-                error_message = create_message(
-                    MessageType.ERROR,
-                    message=f"Site {site_id} is not authorized for job {job_id}",
-                    code="UNAUTHORIZED_SITE"
-                )
-                await self.manager.send_to_site(error_message, site_id)
-                print(f"📤 SIMI: Sent 'unauthorized site' error to site {site_id}")
-                return
-            
-            self.site_to_job[site_id] = job_id
-            
-            # Send method to the remote site
-            method = job["method"]
-            await self.manager.send_to_site(
-                create_message(MessageType.METHOD, method=method),
-                site_id
-            )
-            
-            self.add_status_message(job_id, f"Instructed site {site_id} to use {method} method")
-            return
-        
-        # Resolve job_id via mapping if absent
-        if job_id is None:
-            job_id = self.site_to_job.get(site_id)
-            if job_id is None:
-                return
-        
-        if job_id not in self.jobs:
-            return
-        
         job = self.jobs[job_id]
         
-        # Handle data messages (Gaussian sufficient stats)
+        # Handle algorithm-specific data messages (Gaussian sufficient stats)
         if message_type == "data":
+            print(f"🔍 SIMI: Processing data message from site {site_id} for job {job_id}")
+            print(f"🔍 SIMI: Available jobs: {list(self.jobs.keys())}")
+            print(f"🔍 SIMI: Job exists: {job_id in self.jobs}")
+            
+            if job_id not in self.jobs:
+                print(f"❌ SIMI: Job {job_id} not found in jobs dict!")
+                return
+                
+            job = self.jobs[job_id]
+            print(f"🔍 SIMI: Job participants: {job.get('participants', [])}")
+            print(f"🔍 SIMI: Current data keys: {list(job.get('data', {}).keys())}")
+            
             job["data"][site_id] = {
                 "n": float(data["n"]),
                 "XX": np.array(data["XX"]),
                 "Xy": np.array(data["Xy"]),
                 "yy": float(data["yy"])
             }
+            print(f"📊 SIMI: Received data from site {site_id} for job {job_id}")
+            print(f"📈 SIMI: Current data count: {len(job['data'])}/{len(job['participants'])}")
+            print(f"📋 SIMI: Sites with data: {list(job['data'].keys())}")
+            print(f"📋 SIMI: Expected participants: {job['participants']}")
             self.add_status_message(job_id, f"Received data from site {site_id} (n={float(data['n'])})")
         
         # Handle sample size messages (logistic regression)
@@ -301,7 +243,12 @@ class SIMIService(BaseAlgorithmService):
             
             # Wait for all remote sites to provide their stats
             self.add_status_message(job_id, f"Job {job_id}: Waiting for all sites to send Gaussian statistics")
+            print(f"🔄 SIMI: Starting wait loop - Current data count: {len(job_info['data'])}/{len(job_info['participants'])}")
+            print(f"📋 SIMI: Sites with data: {list(job_info['data'].keys())}")
+            print(f"📋 SIMI: Expected participants: {job_info['participants']}")
+            
             while len(job_info["data"]) < len(job_info["participants"]):
+                print(f"⏳ SIMI: Still waiting - {len(job_info['data'])}/{len(job_info['participants'])} sites have sent data")
                 await asyncio.sleep(0.5)
             self.add_status_message(job_id, f"Job {job_id}: Received data from all {len(job_info['participants'])} sites")
             
@@ -340,7 +287,7 @@ class SIMIService(BaseAlgorithmService):
                 # Send mode + beta to all sites
                 await self.send_to_all_sites(
                     job_id,
-                    MessageType.MODE,
+                    ProtocolMessageType.MODE,
                     mode=mode,
                     beta=beta.tolist()
                 )
@@ -495,7 +442,72 @@ class SIMIService(BaseAlgorithmService):
                 q_values.append(Q_total)
                 job_info["q_values"] = q_values
                 
-                # Log detailed iteration information including Q and beta values
+                # After mode 2 completes, tell the clients they can reconnect
+                if mode == 2:
+                    # Mark job as ready but without duplicating the "Results ready" message
+                    job_info["results_ready"] = True
+                    self.add_status_message(job_id, f"✓ Results ready: Click the \"Download Results\" button to download the imputed dataset.")
+                    
+                    # Create the relative path for the download URL early to include in message
+                    import datetime
+                    import os
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    results_dir = os.path.join("static", "results") 
+                    relative_zip_path = os.path.join(results_dir, f"job_{job_id}_{timestamp}.zip")
+                    
+                    # Mark job as completed in the status tracker
+                    result = {"imputed_dataset_path": relative_zip_path}
+                    try:
+                        # Set flag to indicate we're completing early
+                        job_info["early_completion"] = True
+                        
+                        # Update database by executing a direct update query instead of modifying the object
+                        # This avoids the "already attached to session" error
+                        from ..db import get_db
+                        from sqlalchemy import text
+                        db = next(get_db())
+                        
+                        # Execute direct SQL update instead of modifying the object
+                        db.execute(text(f"UPDATE jobs SET status = 'completed' WHERE id = {job_id}"))
+                        db.commit()
+                        print(f"✅ SIMI: Job {job_id} marked as completed in database after mode 2")
+                        
+                        # Mark job as complete in the status tracker
+                        self.job_status_tracker.complete_job(job_id, result)
+                        print(f"✅ SIMI: Job {job_id} marked as completed in status tracker after mode 2")
+                        
+                        # IMPORTANT: Remove job from the jobs dictionary immediately
+                        # This prevents further reconnections from being accepted
+                        print(f"🧹 SIMI: Removing job {job_id} from state after mode 2 completion")
+                        self.jobs.pop(job_id, None)
+                        print(f"✅ SIMI: Job {job_id} removed from state")
+                        
+                        # Also disconnect all connected sites immediately to prevent further processing
+                        print(f"🔌 SIMI: Disconnecting all sites for job {job_id}")
+                        for site_id in job_info.get('connected_sites', []):
+                            await self.manager.disconnect_site(site_id)
+                        print(f"✅ SIMI: All sites disconnected")
+                    except Exception as e:
+                        print(f"❌ SIMI: Error updating database: {str(e)}")
+                    
+                        # Send completion notification to sites
+                        try:
+                            completion_message = create_message(
+                                "job_completed",
+                                job_id=job_id,
+                                status='completed',
+                                message='SIMI mode 2 completed successfully',
+                                result_path=relative_zip_path
+                            )
+                            for site_id in job_info.get('connected_sites', []):
+                                await self.manager.send_to_site(completion_message, site_id)
+                                print(f"✅ SIMI: Sent completion notification to site {site_id}")
+                                
+                                # Also close the connection with the site
+                                await self.manager.disconnect_site(site_id)
+                                print(f"✅ SIMI: Closed connection with site {site_id}")
+                        except Exception as e:
+                            print(f"❌ SIMI: Error during completion processing: {str(e)}")                # Log detailed iteration information including Q and beta values
                 # Match the exact format requested: "Iteration N: Q = X, beta = X X X..."
                 iter_detail = f"Iteration {mode}: Q = {Q_total:.6f}, beta = {beta_str}"
                 self.add_status_message(job_id, iter_detail)
@@ -567,8 +579,8 @@ class SIMIService(BaseAlgorithmService):
                 final_beta_str = " ".join([f"{b:.6f}" for b in beta])
                 self.add_status_message(job_id, f"Final beta values = {final_beta_str}")
             
-            # Terminate remotes politely
-            await self.send_to_all_sites(job_id, MessageType.MODE, mode=0)
+            # Note: Job completion notification will be sent after results are saved
+            # (replaced the old mode=0 termination with standardized job_completed message)
             
             # Create the aggregated data for imputation
             aggregated_data = {
@@ -599,42 +611,117 @@ class SIMIService(BaseAlgorithmService):
             df.to_csv(csv_path, index=False)
             csv_files.append(csv_path)
         
-        # Create a zip file containing all CSVs
+        # Create metadata about SIMI execution
+        job_info = self.jobs.get(job_id, {})
+        metadata = {
+            'job_id': job_id,
+            'algorithm': 'SIMI',
+            'imputation_count': len(imputed_dfs),
+            'method': method,
+            'target_column': mvar,
+            'is_binary': (method == "logistic"),  # Derive from method
+            'total_sites': len(job_info.get('connected_sites', [])),
+            'timestamp': timestamp,
+            'note': 'SIMI results'
+        }
+        
+        # Add convergence info if available
+        job_info = self.jobs.get(job_id, {})
+        if job_info.get("method") == "logistic" and "convergence_history" in job_info:
+            history = job_info["convergence_history"]
+            metadata['convergence_iterations'] = len(history)
+            metadata['final_convergence_delta'] = history[-1] if history else None
+        
+        # Save metadata
+        metadata_path = os.path.join(job_dir, 'simi_metadata.json')
+        import json
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        # Create a zip file containing all CSVs and metadata
         import zipfile
         zip_path = os.path.join(results_dir, f"job_{job_id}_{timestamp}.zip")
         with zipfile.ZipFile(zip_path, 'w') as zipf:
             for csv_file in csv_files:
                 zipf.write(csv_file, os.path.basename(csv_file))
+            # Add metadata file
+            zipf.write(metadata_path, os.path.basename(metadata_path))
         
         # Create a relative path for the download URL
         relative_zip_path = os.path.join("static", "results", f"job_{job_id}_{timestamp}.zip")
         
-        # Update job record in database
-        db_job.imputed_dataset_path = relative_zip_path
-        db_job.status = "completed"
-        
-        # Commit changes to the database
+        # Update job record in database using direct SQL to avoid session conflicts
         from ..db import get_db
+        from sqlalchemy import text
         db = next(get_db())
-        db.add(db_job)
+        
+        # Use a direct SQL update instead of modifying the object to avoid session conflicts
+        db.execute(text(f"UPDATE jobs SET imputed_dataset_path = '{relative_zip_path}', status = 'completed' WHERE id = {job_id}"))
         db.commit()
         
+        # Note: We're not using db.add(db_job) to avoid "already attached to session" errors
+        
+        print(f"🎉 SIMI: Job {job_id} completed successfully with {len(imputed_dfs)} imputations")
+        print(f"📁 SIMI: Results available at: {relative_zip_path}")
+        
+        # Check if we already completed the job during mode 2
+        if job_info.get("early_completion", False):
+            print(f"ℹ️ SIMI: Job {job_id} was already completed during mode 2, skipping final completion")
+            return
+            
         # Update job status with a specific message about imputation completion
         self.add_status_message(job_id, f"Job {job_id}: Imputation completed and data saved")
         
         # Add a summary of the convergence if we tracked it
-        job_info = self.jobs.get(job_id, {})
         if job_info.get("method") == "logistic" and "convergence_history" in job_info:
             history = job_info["convergence_history"]
             final_iter = len(history)
             final_delta = history[-1] if history else "N/A"
             self.add_status_message(job_id, f"Job {job_id}: Logistic regression summary - {final_iter} iterations, final delta: {final_delta}")
         
-        self.add_status_message(job_id, f"Job {job_id}: Results are available for download")
+        # Show the results ready message if it wasn't already shown during mode 2
+        if not job_info.get("results_ready", False):
+            self.add_status_message(job_id, f"✓ Results ready: Click the \"Download Results\" button to download the imputed dataset.")
         
         # Set the result to include the dataset path
         result = {"imputed_dataset_path": relative_zip_path}
         self.job_status_tracker.complete_job(job_id, result)
         
-        # Clean up
-        self.jobs.pop(job_id, None)  # Safely remove from jobs dict
+        # Use the standardized protocol for job completion notification
+        await self.notify_job_completed(
+            job_id, 
+            result_path=relative_zip_path, 
+            message='SIMI imputation completed successfully'
+        )
+        
+        # We no longer wait 2 minutes since we've already sent the completion message
+        # and we want to prevent unwanted reconnections
+    
+    async def _handle_algorithm_connection(self, site_id: str, job_id: int) -> None:
+        """
+        Handle algorithm-specific connection logic for SIMI.
+        
+        Args:
+            site_id: ID of the remote site
+            job_id: ID of the job
+        """
+        # Send method to the remote site
+        job = self.jobs[job_id]
+        method = job["method"]
+        
+        method_message = create_message(
+            ProtocolMessageType.METHOD, 
+            method=method
+        )
+        await self.manager.send_to_site(method_message, site_id)
+        
+        self.add_status_message(job_id, f"Instructed site {site_id} to use {method} method")
+    
+    def get_algorithm_name(self) -> str:
+        """
+        Get the name of the algorithm.
+        
+        Returns:
+            Algorithm name
+        """
+        return "SIMI"

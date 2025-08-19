@@ -8,7 +8,7 @@ import asyncio
 import json
 from typing import Dict, Any, Optional, Callable, Awaitable, Tuple
 
-from common.algorithm.protocol import create_message, parse_message, MessageType
+from common.algorithm.job_protocol import create_message, parse_message, ProtocolMessageType
 
 
 class ConnectionClient:
@@ -47,6 +47,14 @@ class ConnectionClient:
         self.attempt_count = 0
         self.is_connection_established = False
         self.job_completed = False
+        
+        # Debug connection information
+        print(f"📡 ConnectionClient initialized for site: {site_id}")
+        print(f"🔗 Central URL: {central_url}")
+        print(f"📊 Has status callback: {status_callback is not None}")
+        # Force logging of connection URI
+        uri = self.get_uri()
+        print(f"🌐 Will connect to: {uri}")
     
     def get_uri(self) -> str:
         """
@@ -59,14 +67,74 @@ class ConnectionClient:
     
     def is_job_stopped(self) -> bool:
         """
-        Check if the job has been stopped by the user.
+        Check if the job has been stopped by the user or manually marked for stopping.
+        This method now only stops on explicit completion, not on temporary disconnection.
         
         Returns:
-            True if the job is stopped, False otherwise
+            True if the job is permanently stopped, False otherwise
+        """
+        # Only check internal job_completed flag for current connection attempt
+        # but don't consider this for the overall job state
+        if self.job_completed:
+            print("ℹ️ Current connection attempt marked as completed, but job continues")
+            # Return False to keep reconnection loop going
+            return False
+            
+        # Then check status callback (application state)
+        if self.status_callback:
+            # Get site ID and job ID for better debugging
+            job_id = getattr(self.status_callback, "job_id", "unknown")
+            site_id = getattr(self.status_callback, "site_id", "unknown")
+            
+            # Get job state
+            job_state = self.status_callback.get_job_state()
+            
+            # If job state is not found, we can't continue
+            if not job_state:
+                print(f"⚠️ Job state for job {job_id} on site {site_id} not found in application state!")
+                # Return True to stop reconnection attempts since we have no job
+                return True
+            
+            # Check if explicitly marked as completed by user action
+            # We now only respect explicit user-requested stops
+            if job_state.get('status', '').startswith("Job stopped by user"):
+                print(f"✓ Job {job_id} explicitly stopped by user")
+                return True
+                
+            # For any other state, keep the job running
+            print(f"ℹ️ Job {job_id} still active. Status: {job_state.get('status', 'unknown')}")
+            return False
+            
+        # If no status callback, default to allowing reconnection
+        return False
+        
+    async def request_job_stop(self) -> bool:
+        """
+        Request to update job status to prepare for reconnection.
+        
+        Returns:
+            True if status update was successful, False otherwise
         """
         if self.status_callback:
-            job_state = self.status_callback.get_job_state()
-            return job_state and job_state.get('completed', False)
+            try:
+                # Update job status instead of marking as completed
+                await self.status_callback.on_complete()
+                print("✅ Job status updated for reconnection")
+                
+                # Set internal flag to allow current connection attempt to finish
+                # but don't remove the job
+                self.job_completed = True
+                
+                # Verify the job is still in app state
+                job_state = self.status_callback.get_job_state()
+                if job_state:
+                    print(f"✅ Job still present in app state with status: {job_state.get('status')}")
+                    return True
+                else:
+                    print("⚠️ Warning: Job not found in app state")
+                    return False
+            except Exception as e:
+                print(f"❌ Failed to update job status: {str(e)}")
         return False
     
     async def send_status(self, message: str) -> None:
@@ -114,6 +182,9 @@ class ConnectionClient:
             else:
                 await self.send_status(f"Connection attempt #{self.attempt_count}: Reconnecting to central server...")
             
+            # Add debug info for reconnection attempts
+            print(f"📡 Connection attempt #{self.attempt_count}: Connecting to {uri}")
+            
             # Try to establish connection with timeout
             websocket = await asyncio.wait_for(
                 websockets.connect(
@@ -125,6 +196,8 @@ class ConnectionClient:
                 timeout=self.connect_timeout
             )
             
+            # Success!
+            print(f"✅ Connection established on attempt #{self.attempt_count}")
             await self.send_status("Connection established")
             self.is_connection_established = True
             return True, websocket
@@ -153,7 +226,7 @@ class ConnectionClient:
             return False, None
     
     async def send_message(self, websocket: websockets.WebSocketClientProtocol, 
-                          message_type: MessageType, **payload) -> bool:
+                          message_type: ProtocolMessageType, **payload) -> bool:
         """
         Send a message to the central server.
         
@@ -224,7 +297,36 @@ class ConnectionClient:
         self.is_connection_established = False
     
     def reset_for_new_job(self) -> None:
-        """Reset state for a new job attempt."""
+        """Reset state for a new job attempt while keeping job in app state."""
+        print("🔄 ConnectionClient: Resetting connection state for reconnection attempt")
+        
+        # Reset internal state variables
         self.job_completed = False
         self.attempt_count = 0
         self.is_connection_established = False
+        
+        # Update job status in application state but keep the job
+        if self.status_callback:
+            # Get job ID and site ID
+            job_id = getattr(self.status_callback, "job_id", None)
+            site_id = getattr(self, "site_id", None)
+            
+            if job_id and site_id:
+                try:
+                    # Update the job status without removing it
+                    job_state = self.status_callback.get_job_state()
+                    if job_state:
+                        job_state['status'] = "Reconnecting to central server..."
+                        job_state['messages'].append("Reconnecting to central server...")
+                        print(f"✅ Updated job {job_id} status for reconnection attempt")
+                except Exception as e:
+                    print(f"❌ Error updating job status: {str(e)}")
+        
+        print(f"✅ Reset complete - job_completed={self.job_completed}, attempt_count={self.attempt_count}")
+        
+        # Force an immediate status update to show in logs
+        asyncio.create_task(self.send_status("Connection state reset, reconnecting to central server..."))
+        
+        # Print URI to confirm connection details are preserved
+        uri = self.get_uri()
+        print(f"📡 Will reconnect to: {uri}")

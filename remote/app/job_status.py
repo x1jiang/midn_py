@@ -19,9 +19,17 @@ class JobStatusCallback:
         """Handle job completion"""
         job_state = self.get_job_state()
         if job_state:
-            job_state['round_completed'] = True  # Mark round as completed instead of full job
-            job_state['status'] = "Data exchange completed successfully"
-            job_state['messages'].append("Data exchange completed successfully")
+            # Explicitly ensure completed flag is False to allow reconnection
+            job_state['completed'] = False
+            job_state['status'] = "Job iteration completed, will reconnect shortly"
+            job_state['messages'].append("Job iteration completed, will reconnect shortly")
+            
+            # Log status update for debugging
+            print(f"JobStatusCallback: Job {self.job_id} for site {self.site_id} status updated to reconnecting")
+            print(f"JobStatusCallback: Explicitly set completed=False to ensure reconnection")
+            
+            # Print full job state for debugging
+            print(f"JobStatusCallback: Current job state = {job_state}")
             
     async def on_error(self, error):
         """Handle job error"""

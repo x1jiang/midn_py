@@ -8,7 +8,7 @@ import websockets
 import json
 from typing import Dict, Any, Optional, Callable, Awaitable, Tuple
 
-from common.algorithm.protocol import create_message, parse_message, MessageType
+from common.algorithm.job_protocol import create_message, parse_message, ProtocolMessageType
 
 
 class ConnectionClient:
@@ -146,7 +146,7 @@ class ConnectionClient:
             return False, None
     
     async def send_message(self, websocket: websockets.WebSocketClientProtocol, 
-                          message_type: MessageType, **payload) -> bool:
+                          message_type: ProtocolMessageType, **payload) -> bool:
         """
         Send a message to the central server.
         
@@ -203,6 +203,17 @@ class ConnectionClient:
         """Mark that the current job has completed."""
         self.job_completed = True
         self.is_connection_established = False
+        
+        # Also update the status callback if available
+        if self.status_callback:
+            try:
+                import asyncio
+                # Try to run the completion callback
+                if hasattr(self.status_callback, 'on_complete'):
+                    # Create a task to run the async method
+                    asyncio.create_task(self.status_callback.on_complete())
+            except Exception as e:
+                print(f"Error calling status callback completion: {e}")
     
     def reset_for_new_job(self) -> None:
         """Reset state for a new job attempt."""

@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Dict, Any, List, Optional, Type
 
 from common.algorithm.base import RemoteAlgorithm
-from common.algorithm.protocol import MessageType
+from common.algorithm.job_protocol import ProtocolMessageType
 from ..websockets.connection_client import ConnectionClient
 
 

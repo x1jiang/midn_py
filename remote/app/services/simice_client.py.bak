@@ -1,0 +1,423 @@
+"""
+SIMICE client implementation for remote site using standardized job protocol.
+Multiple Imputation using Chained Equations.
+"""
+
+import asyncio
+import json
+import numpy as np
+import pandas as pd
+import traceback
+from typing import Dict, Any, List, Optional, Type
+
+from common.algorithm.base import RemoteAlgorithm
+from common.algorithm.job_protocol import (
+    Protocol, JobStatus, RemoteStatus, ProtocolMessageType, ErrorCode,
+    create_message, parse_message
+)
+from ..websockets.connection_client import ConnectionClient
+from .federated_job_protocol_client import FederatedJobProtocolClient
+
+
+class SIMICEClient(FederatedJobProtocolClient):
+    """
+    Client for the SIMICE algorithm on the remote site.
+    Multiple Imputation using Chained Equations.
+    """
+    
+    def __init__(self, algorithm_class: Type[RemoteAlgorithm]):
+        """
+        Initialize SIMICE client.
+        
+        Args:
+            algorithm_class: Algorithm class to use
+        """
+        super().__init__(algorithm_class)
+        self.target_column_indexes = []
+        self.is_binary = []
+        self.iteration_before_first_imputation = 5
+        self.iteration_between_imputations = 3
+    
+    async def run_algorithm(self, data: np.ndarray, target_column: int,
+                           job_id: int, site_id: str, central_url: str, token: str,
+                           extra_params: Optional[Dict[str, Any]] = None,
+                           status_callback: Optional[Any] = None,
+                           **kwargs) -> None:
+        """
+        Run the SIMICE algorithm.
+        
+        Args:
+            data: Data array
+            target_column: Index of the target column (used for compatibility, SIMICE uses multiple columns)
+            job_id: ID of the job
+            site_id: ID of this site
+            central_url: URL of the central server
+            token: Authentication token
+            extra_params: Additional parameters for the algorithm
+            status_callback: Callback for status updates
+            **kwargs: Additional keyword arguments (target_column_indexes, is_binary, etc.)
+        """
+        # Extract SIMICE-specific parameters from kwargs and extra_params
+        if extra_params is None:
+            extra_params = {}
+            
+        target_column_indexes = kwargs.get('target_column_indexes')
+        is_binary = kwargs.get('is_binary')
+        
+        if not target_column_indexes:
+            target_column_indexes = extra_params.get('target_column_indexes')
+            is_binary = extra_params.get('is_binary')
+        
+        # Fallback to single column if no specific columns provided
+        if not target_column_indexes:
+            target_column_indexes = [target_column + 1]  # Convert to 1-based
+        
+        if not is_binary:
+            is_binary = [False] * len(target_column_indexes)
+        
+        # Store parameters and update extra_params to ensure they get passed to base class
+        self.target_column_indexes = target_column_indexes
+        self.is_binary = is_binary
+        extra_params['target_column_indexes'] = target_column_indexes
+        extra_params['is_binary'] = is_binary
+        
+        # Store additional parameters
+        self.iteration_before_first_imputation = extra_params.get("iteration_before_first_imputation", 5)
+        self.iteration_between_imputations = extra_params.get("iteration_between_imputations", 3)
+        
+        # Call the base implementation with the updated extra_params
+        await super().run_algorithm(
+            data=data,
+            target_column=target_column,
+            job_id=job_id,
+            site_id=site_id,
+            central_url=central_url,
+            token=token,
+            extra_params=extra_params,
+            status_callback=status_callback
+        )
+        
+        print(f"🚀 SIMICE Remote: Starting algorithm for job {job_id}")
+        print(f"📊 SIMICE Remote: Target columns: {target_column_indexes}")
+        print(f"🏷️ SIMICE Remote: Binary flags: {is_binary}")
+        
+        # Add any extra parameters to the connection message
+        connect_message = {
+            "type": "connect",
+            "job_id": job_id,
+            "iteration_before_first_imputation": self.iteration_before_first_imputation,
+            "iteration_between_imputations": self.iteration_between_imputations
+        }
+        
+        # Main connection loop - implementing the required communication pattern
+        while not client.is_job_stopped():
+            # Try to connect
+            print(f"🔌 SIMICE Remote: Attempting to connect to central server...")
+            success, websocket = await client.connect()
+            if not success:
+                print(f"❌ SIMICE Remote: Connection failed, retrying in {client.retry_delay}s...")
+                await asyncio.sleep(client.retry_delay)
+                continue
+            
+            try:
+                # Connection successful - now try to start the job
+                print("✅ SIMICE Remote: Connected to central server, attempting to start job...")
+                
+                # Send connect message
+                print(f"📤 SIMICE Remote: Sending connect message: {connect_message}")
+                if not await client.send_message(websocket, ProtocolMessageType.CONNECT, **connect_message):
+                    print("❌ SIMICE Remote: Failed to send connect message, retrying...")
+                    continue
+                
+                # Wait for connection confirmation from central
+                print("⏳ SIMICE Remote: Waiting for connection confirmation...")
+                message = await client.receive_message(websocket)
+                if not message:
+                    print("❌ SIMICE Remote: No response from central, retrying...")
+                    continue
+                
+                message_type = message.get("type")
+                print(f"📨 SIMICE Remote: Received message type: {message_type}")
+                
+                # Check if central rejected us due to various reasons
+                if message_type == "error" or message_type == "job_conflict":
+                    error_msg = message.get("message", "Job conflict or central busy")
+                    error_code = message.get("code", "UNKNOWN")
+                    print(f"💥 SIMICE Remote: Central server error: {error_msg} (Code: {error_code})")
+                    
+                    # Different wait times and callback handling based on error type
+                    if error_code == "NO_JOBS_AVAILABLE":
+                        # No jobs available - this is not a failure, just a normal waiting state
+                        if status_callback:
+                            await status_callback.on_message(f"Waiting for jobs: {error_msg}")
+                        print(f"⏳ SIMICE Remote: No jobs available. Waiting {client.retry_delay} seconds before retry...")
+                        await asyncio.sleep(client.retry_delay)
+                    elif error_code in ["JOB_NOT_FOUND", "MISSING_JOB_ID", "UNAUTHORIZED_SITE"]:
+                        # These are configuration errors - report as error
+                        if status_callback:
+                            await status_callback.on_error(f"Configuration issue: {error_msg}")
+                        print(f"⚠️ SIMICE Remote: Configuration issue. Waiting {client.completion_wait_time} seconds before retry...")
+                        await asyncio.sleep(client.completion_wait_time)
+                    else:
+                        # Default case - report as error (job conflict, server issues, etc.)
+                        if status_callback:
+                            await status_callback.on_error(f"Central server error: {error_msg}")
+                        print(f"⏳ SIMICE Remote: Job conflict or other issue. Waiting {client.completion_wait_time} seconds...")
+                        await asyncio.sleep(client.completion_wait_time)
+                    continue
+                
+                if message_type == "connection_confirmed":
+                    print("✅ SIMICE Remote: Connection confirmed by central!")
+                    
+                    # Send our local data summary
+                    await self.send_data_summary(client, websocket, initial_data, job_id)
+                    
+                    # Start the main SIMICE protocol - this will handle the job until completion
+                    job_completed = await self.run_simice_protocol(client, websocket, initial_data, job_id)
+                    
+                    if job_completed:
+                        print("🎉 SIMICE Remote: Job completed successfully!")
+                        
+                        # Mark job as completed FIRST to stop the main loop
+                        client.mark_job_completed()
+                        
+                        print("⏳ SIMICE Remote: Waiting 2 minutes before reconnection...")
+                        await asyncio.sleep(120)  # 2 minutes wait
+                        
+                        # Reset for new job after the wait
+                        client.reset_for_new_job()
+                        # Exit the main loop to restart connection cycle
+                        break
+                    else:
+                        print("❌ SIMICE Remote: Job failed or was interrupted")
+                        # Mark job as completed and wait before next attempt
+                        client.mark_job_completed()
+                        await asyncio.sleep(client.completion_wait_time)
+                        client.reset_for_new_job()
+                        # Exit the main loop to restart connection cycle
+                        break
+                    
+                elif message_type == "error":
+                    error_msg = message.get("message", "Unknown error")
+                    print(f"💥 SIMICE Remote: Received error from central: {error_msg}")
+                    if status_callback:
+                        await status_callback.on_error(f"Central server error: {error_msg}")
+                    break
+                    
+                else:
+                    print(f"⚠️ SIMICE Remote: Unexpected message type: {message_type}")
+                    continue
+                    
+            except Exception as e:
+                print(f"💥 SIMICE Remote: Error in connection loop: {e}")
+                if status_callback:
+                    await status_callback.on_error(f"Connection error: {str(e)}")
+                
+                # Connection lost - wait and retry (use completion wait time if connection was established)
+                if client.is_connection_established:
+                    print(f"⏳ SIMICE Remote: Connection lost during job. Waiting {client.completion_wait_time} seconds...")
+                    await asyncio.sleep(client.completion_wait_time)
+                else:
+                    await asyncio.sleep(client.retry_delay)
+                continue
+    
+    async def send_data_summary(self, client: ConnectionClient, websocket, data: Dict[str, Any], job_id: int) -> None:
+        """Send local data summary to central."""
+        print("📊 SIMICE Remote: Sending data summary to central...")
+        
+        # Send data summary
+        await client.send_message(
+            websocket,
+            "data_summary",
+            job_id=job_id,
+            **data
+        )
+        print("✅ SIMICE Remote: Data summary sent!")
+    
+    async def run_simice_protocol(self, client: ConnectionClient, websocket, initial_data: Dict[str, Any], job_id: int) -> bool:
+        """
+        Run the main SIMICE protocol.
+        
+        Returns:
+            True if job completed successfully, False otherwise
+        """
+        print("🔄 SIMICE Remote: Starting SIMICE protocol...")
+        
+        try:
+            # Main protocol loop
+            while not client.is_job_stopped():
+                # Wait for instructions from central
+                message = await client.receive_message(websocket)
+                if not message:
+                    print("⚠️ SIMICE Remote: No message received, connection may be closed")
+                    return False
+                
+                message_type = message.get("type")
+                print(f"📨 SIMICE Remote: Received instruction: {message_type}")
+                
+                if message_type == "compute_statistics":
+                    await self.handle_compute_statistics(client, websocket, message, job_id)
+                    
+                elif message_type == "update_imputations":
+                    await self.handle_update_imputations(client, websocket, message, job_id)
+                    
+                elif message_type == "get_final_data":
+                    await self.handle_get_final_data(client, websocket, message, job_id)
+                    
+                elif message_type == "job_completed":
+                    print("🎉 SIMICE Remote: Job completed successfully!")
+                    result_path = message.get("result_path", "")
+                    if result_path:
+                        print(f"📁 SIMICE Remote: Results available at: {result_path}")
+                    print("⏹️ SIMICE Remote: Stopping algorithm and waiting 2 minutes before reconnect...")
+                    return True
+                    
+                elif message_type == "job_complete":  # Keep backward compatibility
+                    print("🎉 SIMICE Remote: Job completed!")
+                    return True
+                    
+                elif message_type == "error":
+                    error_msg = message.get("message", "Unknown error")
+                    print(f"💥 SIMICE Remote: Received error: {error_msg}")
+                    return False
+                    
+                else:
+                    print(f"⚠️ SIMICE Remote: Unknown message type: {message_type}")
+                    
+        except Exception as e:
+            print(f"💥 SIMICE Remote: Error in protocol: {e}")
+            return False
+        
+        return False  # If we exit the loop without explicit completion
+    
+    async def handle_compute_statistics(self, client: ConnectionClient, websocket, message: Dict[str, Any], job_id: int) -> None:
+        """Handle compute statistics request."""
+        target_col_idx = message.get("target_col_idx", 0)  # 0-based index
+        method = message.get("method", "gaussian")
+        
+        print(f"📊 SIMICE Remote: Computing statistics for column {target_col_idx} using {method}")
+        
+        try:
+            # Compute local statistics using the algorithm
+            print(f"🔄 SIMICE Remote: Calling compute_local_statistics...")
+            stats = await self.algorithm_instance.compute_local_statistics(target_col_idx, method)
+            print(f"✅ SIMICE Remote: Statistics computed successfully")
+            
+            # Send statistics back to central
+            print(f"📤 SIMICE Remote: Sending statistics to central...")
+            await client.send_message(
+                websocket,
+                "statistics",
+                job_id=job_id,
+                target_col_idx=target_col_idx,
+                method=method,
+                statistics=stats
+            )
+            print(f"✅ SIMICE Remote: Statistics sent for column {target_col_idx}")
+            
+        except Exception as e:
+            print(f"💥 SIMICE Remote: Error computing statistics: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Send error back to central
+            await client.send_message(
+                websocket,
+                "statistics",
+                job_id=job_id,
+                target_col_idx=target_col_idx,
+                method=method,
+                statistics={},
+                error=str(e)
+            )
+            print(f"❌ SIMICE Remote: Sent error response for column {target_col_idx}")
+    
+    async def handle_update_imputations(self, client: ConnectionClient, websocket, message: Dict[str, Any], job_id: int) -> None:
+        """Handle update imputations request."""
+        target_col_idx = message.get("target_col_idx", 0)  # 0-based index
+        global_params = message.get("global_parameters", {})
+        
+        print(f"🔄 SIMICE Remote: Updating imputations for column {target_col_idx}")
+        
+        # Update local imputations using the algorithm
+        updated_data = await self.algorithm_instance.update_imputations(target_col_idx, global_params)
+        
+        # Send confirmation back to central
+        await client.send_message(
+            websocket,
+            "imputation_updated",
+            job_id=job_id,
+            target_col_idx=target_col_idx,
+            status="completed"
+        )
+        print(f"✅ SIMICE Remote: Imputations updated for column {target_col_idx}")
+    
+    async def handle_get_final_data(self, client: ConnectionClient, websocket, message: Dict[str, Any], job_id: int) -> None:
+        """Handle request for final imputed data."""
+        try:
+            print(f"📤 SIMICE Remote: Collecting final imputed data for job {job_id}")
+            
+            # Get the final imputed datasets from the algorithm
+            imputed_data = {}
+            
+            # Get the current data with all imputations from the algorithm
+            final_data = await self.algorithm_instance.get_final_imputed_data()
+            
+            if final_data:
+                # Convert DataFrames to dictionaries for JSON serialization
+                for key, df in final_data.items():
+                    if hasattr(df, 'to_dict'):
+                        imputed_data[key] = df.to_dict()
+                    else:
+                        imputed_data[key] = df
+            
+            # Send the final data back to central
+            await client.send_message(
+                websocket,
+                "final_data",
+                job_id=job_id,
+                imputed_data=imputed_data
+            )
+            
+            print(f"✅ SIMICE Remote: Sent final imputed data for job {job_id}")
+            
+        except Exception as e:
+            print(f"💥 SIMICE Remote: Error getting final data: {e}")
+            # Send error response
+            await client.send_message(
+                websocket,
+                "final_data",
+                job_id=job_id,
+                imputed_data={},
+                error=str(e)
+            )
+    
+    async def handle_message(self, message_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle a message from the central site.
+        
+        Args:
+            message_type: Type of the message
+            payload: Message payload
+            
+        Returns:
+            Response payload (if any)
+        """
+        print(f"📨 SIMICE Client: Handling message type: {message_type}")
+        
+        # SIMICE uses custom protocol, so this method is not used
+        # All message handling is done in run_simice_protocol
+        return {}
+    
+    async def process_method_message(self, method: str) -> None:
+        """
+        Process a method message from the central site.
+        
+        Args:
+            method: Method to use for the algorithm
+        """
+        print(f"🔧 SIMICE Client: Processing method: {method}")
+        
+        # SIMICE uses custom protocol with multiple methods per target column
+        # This method is not used in SIMICE's protocol
+        pass

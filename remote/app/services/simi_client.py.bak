@@ -1,0 +1,644 @@
+"""
+SIMI client implementation for remote site using standardized job protocol.
+"""
+
+import asyncio
+import json
+import numpy as np
+import pandas as pd
+from typing import Dict, Any, Optional, Type, Tuple
+
+from common.algorithm.base import RemoteAlgorithm
+from common.algorithm.protocol import create_message, MessageType
+from common.algorithm.job_protocol import Protocol, JobStatus, RemoteStatus, ProtocolMessageType, ErrorCode
+from .federated_job_protocol_client import FederatedJobProtocolClient
+from ..websockets.connection_client import ConnectionClient
+
+
+class SIMIClient(FederatedJobProtocolClient):
+    """
+    Client for the SIMI algorithm on the remote site.
+    """
+    
+    def __init__(self, algorithm_class: Type[RemoteAlgorithm]):
+        """
+        Initialize SIMI client.
+        
+        Args:
+            algorithm_class: Algorithm class to use
+        """
+        super().__init__(algorithm_class)
+        self.method = "gaussian"  # Default method
+    
+    async def _process_method_instruction(self, client: ConnectionClient, method: str) -> None:
+        """
+        Process a method instruction from the central server.
+        
+        Args:
+            client: Connection client
+            method: Method to use
+        """
+        # Update the method based on the instruction from central
+        self.method = method.lower()
+        await client.send_status(f"Using SIMI method: {self.method}")
+        
+        # Make sure the algorithm instance has the correct method
+        if hasattr(self.algorithm_instance, 'method'):
+            if self.algorithm_instance.method != self.method:
+                self.algorithm_instance.method = self.method
+                await client.send_status(f"Updated algorithm method to {self.method}")
+    
+    async def _handle_algorithm_computation(self, client: ConnectionClient, websocket: Any,
+                                           data: np.ndarray, target_column: int, 
+                                           job_id: int, initial_data: Dict[str, Any]) -> None:
+        """
+        Handle SIMI-specific computation.
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            data: Data array
+            target_column: Target column index
+            job_id: Job ID
+            initial_data: Initial prepared data
+        """
+        await client.send_status(f"Starting SIMI computation with method: {self.method}")
+        
+        # Different handling based on the method
+        if self.method == "gaussian":
+            # For Gaussian, send the statistics
+            ls_stats = await self.algorithm_instance.process_message("method", {"method": self.method})
+            if not await client.send_message(websocket, MessageType.DATA, job_id=job_id, **ls_stats):
+                await client.send_status("Failed to send data, job may have failed")
+                return
+            
+            await client.send_status("Gaussian statistics sent to central server")
+            
+        else:  # Logistic method
+            # First send initial sample size
+            if not await client.send_message(websocket, MessageType.DATA, job_id=job_id, **initial_data):
+                await client.send_status("Failed to send initial data")
+                return
+            
+            await client.send_status("Initial sample size sent to central server")
+    
+    async def _process_algorithm_message(self, client: ConnectionClient, websocket: Any, message: Dict[str, Any]) -> bool:
+        """
+        Process an algorithm-specific message.
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            message: Message to process
+            
+        Returns:
+            True to continue processing, False to exit processing loop
+        """
+        message_type = message.get("type")
+        
+        if message_type == "mode":
+            mode = message.get("mode", 0)
+            
+            # Mode 0 means termination (backward compatibility)
+            if mode == 0:
+                await client.send_status("Received legacy termination signal (mode 0)")
+                
+                # Convert to standardized format
+                standardized_message = {
+                    "type": ProtocolMessageType.JOB_COMPLETED.value,
+                    "job_id": self.job_state.get("job_id"),
+                    "status": JobStatus.COMPLETED.value,
+                    "message": "Job completed successfully (mode 0)"
+                }
+                await self._handle_job_completed(client, websocket, standardized_message)
+                return False  # Exit processing loop
+            
+            # Process this iteration
+            await client.send_status(f"Processing logistic iteration {mode}...")
+            
+            # Make sure we have the beta parameter
+            if "beta" not in message:
+                await client.send_status("Missing 'beta' parameter in mode message")
+                return False  # Exit processing loop
+            
+            # Process the message with the algorithm
+            await client.send_status(f"Processing mode {mode} with beta values...")
+            results = await self.algorithm_instance.process_message("mode", message)
+            
+            # Send results based on the mode
+            if mode >= 2 and "nQ" in results:
+                # Mode 2+ expects only Q for line search
+                payload = {"type": "Q", "Q": results["nQ"]}
+                await client.send_status(f"Sending Q value: {results['nQ']} for line search")
+                if not await client.send_message(websocket, MessageType.DATA, job_id=self.job_state.get("job_id"), **payload):
+                    await client.send_status("Failed to send Q data")
+                    return False  # Exit processing loop
+            else:
+                # Mode 1 expects H, g, Q
+                # Send H first (largest payload)
+                if "H" in results:
+                    payload = {"type": "H", "H": results["H"]}
+                    await client.send_status(f"Sending H matrix of size {len(results['H'])}x{len(results['H'][0]) if len(results['H']) > 0 else 0}")
+                    if not await client.send_message(websocket, MessageType.DATA, job_id=self.job_state.get("job_id"), **payload):
+                        await client.send_status("Failed to send H data")
+                        return False  # Exit processing loop
+                
+                # Then send g
+                if "g" in results:
+                    payload = {"type": "g", "g": results["g"]}
+                    await client.send_status(f"Sending g vector of size {len(results['g'])}")
+                    if not await client.send_message(websocket, MessageType.DATA, job_id=self.job_state.get("job_id"), **payload):
+                        await client.send_status("Failed to send g data")
+                        return False  # Exit processing loop
+                
+                # Finally send Q
+                if "Q" in results:
+                    payload = {"type": "Q", "Q": results["Q"]}
+                    await client.send_status(f"Sending Q value: {results['Q']}")
+                    if not await client.send_message(websocket, MessageType.DATA, job_id=self.job_state.get("job_id"), **payload):
+                        await client.send_status("Failed to send Q data")
+                        return False  # Exit processing loop
+        
+        elif message_type in ["job_completed", "job_complete"]:
+            # Handle both standardized and legacy completion messages
+            if message_type == "job_complete":
+                # Convert legacy format to standardized format
+                standardized_message = {
+                    "type": ProtocolMessageType.JOB_COMPLETED.value,
+                    "job_id": self.job_state.get("job_id"),
+                    "status": JobStatus.COMPLETED.value,
+                    "message": "Job completed successfully (legacy format)"
+                }
+                await self._handle_job_completed(client, websocket, standardized_message)
+            else:
+                # Handle standardized format
+                await self._handle_job_completed(client, websocket, message)
+                
+            return False  # Exit processing loop
+            
+        return True  # Continue processing
+    
+    async def _handle_job_completed(self, client: ConnectionClient, websocket: Any, message: Dict[str, Any]) -> None:
+        """
+        Handle a job completion notification with SIMI-specific logic.
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            message: Job completion message
+        """
+        # Call the base implementation
+        await super()._handle_job_completed(client, websocket, message)
+        
+        # Add SIMI-specific completion handling
+        await client.send_status("SIMI job completed successfully")
+        
+        # Check if we should reset for the next iteration
+        if message.get("next_iteration", False):
+            # Reset job state for the next iteration
+            self.job_state["job_completed"] = False
+            self.job_state["completion_acknowledged"] = False
+            
+            # Wait before reconnection for next iteration
+            await client.send_status("Waiting for next iteration...")
+            await asyncio.sleep(30)
+        else:
+            # Final completion, no need to reset
+            await client.send_status("SIMI job fully completed, no more iterations required")
+            # Leave job_completed and completion_acknowledged as True
+        
+    async def run_algorithm(self, data: np.ndarray, target_column: int,
+                           job_id: int, site_id: str, central_url: str, token: str,
+                           extra_params: Optional[Dict[str, Any]] = None,
+                           status_callback: Optional[Any] = None,
+                           is_binary: bool = False) -> None:
+        """
+        Run the SIMI algorithm.
+        
+        Args:
+            data: Data array
+            target_column: Index of the target column
+            job_id: ID of the job
+            site_id: ID of this site
+            central_url: URL of the central server
+            token: Authentication token
+            extra_params: Additional parameters for the algorithm
+            status_callback: Callback for status updates
+            is_binary: Whether the target variable is binary (for logistic regression)
+        """
+        # Binary flag (from parameter or extra_params)
+        # Parameter takes precedence over extra_params
+        if extra_params is None:
+            extra_params = {}
+            
+        if is_binary:
+            extra_params["is_binary"] = True
+        elif "is_binary" in extra_params:
+            is_binary = extra_params.get("is_binary", False)
+        
+        # Set method based on is_binary flag
+        self.method = "logistic" if is_binary else "gaussian"
+        
+        # Call the base implementation with the updated extra_params
+        await super().run_algorithm(
+            data=data, 
+            target_column=target_column,
+            job_id=job_id, 
+            site_id=site_id, 
+            central_url=central_url, 
+            token=token, 
+            extra_params=extra_params,
+            status_callback=status_callback
+        )
+        
+        # Check if we have a status callback (application state connection)
+        if client.status_callback:
+            # Reset the job state in the application
+            job_state = client.status_callback.get_job_state()
+            if job_state:
+                if job_state.get('completed', False):
+                    print("⚠️ Job already marked as completed in application state, resetting...")
+                    job_state['completed'] = False
+                    job_state['status'] = "Job restarted"
+                    job_state['messages'] = ['Job restarted for new connection attempt']
+            
+        # Main connection loop
+        while True:  # Changed to always attempt reconnection
+            # Check job status but don't use it to exit loop
+            is_stopped = client.is_job_stopped()
+            if is_stopped:
+                print("⚠️ Warning: Job marked as stopped but attempting reconnection anyway")
+                # Force it to continue
+                if client.status_callback:
+                    job_state = client.status_callback.get_job_state()
+                    if job_state and job_state.get('completed', False):
+                        print("🛠️ Fixing job state to allow reconnection")
+                        job_state['completed'] = False
+            
+            loop_counter += 1
+            print(f"🔁 Main connection loop iteration #{loop_counter}")
+            
+            # Try to connect
+            success, websocket = await client.connect()
+            if not success:
+                # Connection failed - could mean central is not ready or job already running
+                await client.send_status(f"Connection failed, will retry in {client.retry_delay} seconds...")
+                await asyncio.sleep(client.retry_delay)
+                continue
+            
+            try:
+                # Connection successful - now try to start the job
+                await client.send_status("Connected to central server, attempting to start job...")
+                
+                # Send connect message
+                if not await client.send_message(websocket, MessageType.CONNECT, **connect_message):
+                    # Connection error during send, retry
+                    await client.send_status("Failed to send connection message, reconnecting...")
+                    continue
+                
+                # Wait for response from central
+                message = await client.receive_message(websocket)
+                if not message:
+                    await client.send_status("No response from central, reconnecting...")
+                    continue
+                
+                message_type = message.get("type")
+                
+                # Check if central rejected us due to various reasons
+                if message_type == "error" or message_type == "job_conflict":
+                    error_msg = message.get("message", "Job conflict or central busy")
+                    error_code = message.get("code", "UNKNOWN")
+                    await client.send_status(f"Central server error: {error_msg} (Code: {error_code})")
+                    
+                    # Different wait times based on error type
+                    if error_code == "NO_JOBS_AVAILABLE":
+                        # No jobs available - use normal retry delay (15 seconds)
+                        await client.send_status(f"No jobs available. Waiting {client.retry_delay} seconds before retry...")
+                        await asyncio.sleep(client.retry_delay)
+                    elif error_code in ["JOB_NOT_FOUND", "MISSING_JOB_ID", "UNAUTHORIZED_SITE"]:
+                        # These are configuration errors - wait longer before retry  
+                        await client.send_status(f"Configuration issue. Waiting {client.completion_wait_time} seconds before retry...")
+                        await asyncio.sleep(client.completion_wait_time)
+                    else:
+                        # Default case - assume job conflict, wait for completion
+                        await client.send_status(f"Job conflict or other issue. Waiting {client.completion_wait_time} seconds...")
+                        await asyncio.sleep(client.completion_wait_time)
+                    continue
+                
+                if message_type != "method":
+                    # Unexpected response, retry
+                    await client.send_status(f"Unexpected response: {message_type}, reconnecting...")
+                    continue
+                
+                # Successfully connected and received method instruction
+                await client.send_status("Successfully connected! Job starting...")
+                
+                # Process the method message
+                method = message.get("method", "gaussian").lower()
+                await self.process_method_message(method)
+                
+                # Mark that we have an established connection for this job
+                job_active = True
+                job_completed_successfully = False  # Track if job completed successfully
+                
+                # Handle the rest of the protocol based on the method
+                if self.method == "gaussian":
+                    # For Gaussian, just send the stats
+                    ls_stats = await self.algorithm_instance.process_message("method", {"method": self.method})
+                    if not await client.send_message(websocket, MessageType.DATA, job_id=job_id, **ls_stats):
+                        await client.send_status("Failed to send data, job may have failed")
+                        job_active = False
+                        continue
+                        
+                    # Wait for completion signal or timeout
+                    await client.send_status("Data sent, waiting for job completion...")
+                    completion_timeout = 300  # 5 minutes for job completion
+                    start_wait = asyncio.get_event_loop().time()
+                    
+                    while job_active and (asyncio.get_event_loop().time() - start_wait) < completion_timeout:
+                        try:
+                            # Check for completion message
+                            completion_msg = await asyncio.wait_for(
+                                client.receive_message(websocket), 
+                                timeout=10  # Short timeout for checking
+                            )
+                            if completion_msg:
+                                message_type = completion_msg.get("type")
+                                if message_type == "job_completed":
+                                    # New standardized completion message
+                                    await client.send_status("🎉 SIMI: Job completed successfully!")
+                                    await client.send_status("⏹️ SIMI: Stopping algorithm and waiting 30 seconds before reconnect...")
+                                    job_active = False  # Mark as completed but successful
+                                    job_completed_successfully = True
+                                    break
+                                    
+                                elif message_type == "job_complete":
+                                    # Legacy completion message (backward compatibility)
+                                    await client.send_status("🎉 SIMI: Job completed successfully!")
+                                    await client.send_status("⏹️ SIMI: Stopping algorithm and waiting 30 seconds before reconnect...")
+                                    job_active = False  # Mark as completed but successful
+                                    job_completed_successfully = True
+                                    break
+                        except asyncio.TimeoutError:
+                            # No message yet, keep waiting
+                            pass
+                        except Exception:
+                            # Connection lost or other error
+                            job_active = False
+                            break
+                    
+                    if job_active:
+                        # Timeout waiting for completion
+                        await client.send_status("Timeout waiting for job completion")
+                    
+                else:  # Logistic
+                    # First send initial sample size
+                    if not await client.send_message(websocket, "n", **initial_data):
+                        await client.send_status("Failed to send initial data, reconnecting...")
+                        job_active = False
+                        continue
+                    
+                    # Then handle iterations from central
+                    while job_active:
+                        try:
+                            message = await client.receive_message(websocket)
+                            if not message:
+                                await client.send_status("Failed to receive message, connection may be lost")
+                                job_active = False
+                                break
+                                
+                            message_type = message.get("type")
+                            
+                            if message_type == "job_completed":
+                                # New standardized completion message (same as SIMICE)
+                                await client.send_status("🎉 SIMI: Job completed successfully!")
+                                await client.send_status("⏹️ SIMI: Stopping algorithm and waiting 30 seconds before reconnect...")
+                                job_active = False  # Mark as completed but successful
+                                job_completed_successfully = True
+                                break
+                                
+                            elif message_type == "mode":
+                                mode = message.get("mode", 0)
+                                
+                                # Mode 0 means termination - job completed (backward compatibility)
+                                if mode == 0:
+                                    await client.send_status("Received job completion signal from central")
+                                    await client.send_status("🎉 SIMI: Job completed successfully!")
+                                    await client.send_status("⏹️ SIMI: Stopping algorithm and waiting 30 seconds before reconnect...")
+                                    job_active = False  # Mark as completed but successful
+                                    job_completed_successfully = True
+                                    break
+                                
+                                # Process this iteration
+                                await client.send_status(f"Processing iteration {mode}...")
+                                
+                                # Make sure we have the beta parameter in the payload
+                                if "beta" not in message:
+                                    await client.send_error("Missing 'beta' parameter in mode message")
+                                    job_active = False
+                                    break
+                                
+                                # Explicitly ensure the algorithm instance has the correct method set
+                                if hasattr(self.algorithm_instance, 'method'):
+                                    if self.algorithm_instance.method != self.method:
+                                        await client.send_status(f"Updating algorithm method from {self.algorithm_instance.method} to {self.method}")
+                                        self.algorithm_instance.method = self.method
+                                    
+                                # Process the message
+                                results = await self.algorithm_instance.process_message("mode", message)
+                                
+                                # Different handling based on mode
+                                if mode == 2 and "nQ" in results:
+                                    # Mode 2 expects only nQ (line search)
+                                    await client.send_status(f"Mode 2 (line search): Received nQ={results['nQ']}")
+                                    
+                                    # Send nQ as Q value to central
+                                    payload = {"type": "Q", "Q": results["nQ"]}
+                                    await client.send_status(f"Sending Q value: {results['nQ']} for line search")
+                                    if not await client.send_message(websocket, "Q", job_id=job_id, **payload):
+                                        await client.send_error(f"Failed to send Q data")
+                                        job_active = False
+                                        break
+                                    else:
+                                        await client.send_status(f"Sent Q data successfully for line search")
+                                        
+                                else:
+                                    # Mode 1 and others expect H, g, Q
+                                    missing_keys = [k for k in ["H", "g", "Q"] if k not in results]
+                                    if missing_keys:
+                                        await client.send_error(f"Missing expected keys in results: {missing_keys}")
+                                        job_active = False
+                                        break
+                                    
+                                    # Send H, g, Q separately
+                                    await client.send_status(f"Sending results for iteration {mode}...")
+                                    
+                                    # First send H (largest payload, may take more time)
+                                    if "H" in results:
+                                        payload = {"type": "H", "H": results["H"]}
+                                        await client.send_status(f"Sending H matrix of size {len(results['H'])}x{len(results['H'][0]) if len(results['H']) > 0 else 0}")
+                                        if not await client.send_message(websocket, "H", job_id=job_id, **payload):
+                                            await client.send_error(f"Failed to send H data")
+                                            job_active = False
+                                            break
+                                        else:
+                                            await client.send_status(f"Sent H data successfully")
+                                    
+                                    # Then send g
+                                    if "g" in results:
+                                        payload = {"type": "g", "g": results["g"]}
+                                        await client.send_status(f"Sending g vector of size {len(results['g'])}")
+                                        if not await client.send_message(websocket, "g", job_id=job_id, **payload):
+                                            await client.send_error(f"Failed to send g data")
+                                            job_active = False
+                                            break
+                                        else:
+                                            await client.send_status(f"Sent g data successfully")
+                                    
+                                    # Finally send Q (scalar value)
+                                    if "Q" in results:
+                                        payload = {"type": "Q", "Q": results["Q"]}
+                                        await client.send_status(f"Sending Q value: {results['Q']}")
+                                        if not await client.send_message(websocket, "Q", job_id=job_id, **payload):
+                                            await client.send_error(f"Failed to send Q data")
+                                            job_active = False
+                                            break
+                                        else:
+                                            await client.send_status(f"Sent Q data successfully")
+                                            
+                            elif message_type == "error":
+                                error_msg = message.get("message", "Unknown error from central")
+                                await client.send_status(f"Central server error: {error_msg}")
+                                job_active = False
+                                break
+                                
+                        except Exception as e:
+                            await client.send_status(f"Error processing message: {str(e)}")
+                            job_active = False
+                            break
+                
+                # If we reach here, the job has completed (successfully or with error)
+                if job_completed_successfully:
+                    # Job completed successfully - completion message already shown
+                    print("🎉 SIMI Remote: Job completed successfully!")
+                    
+                    # Set the job status message but don't mark as completed
+                    if client.status_callback:
+                        job_state = client.status_callback.get_job_state()
+                        if job_state:
+                            job_state['status'] = "Job iteration completed. Will reconnect after 30 seconds."
+                            job_state['messages'].append("Job iteration completed. Will reconnect after 30 seconds.")
+                            print("ℹ️ Job status updated in application state")
+                            
+                            # Verify job state has completed=false to ensure reconnection
+                            print(f"📊 Job state completed flag = {job_state.get('completed', False)}")
+                            if job_state.get('completed', False):
+                                print("⚠️ Job incorrectly marked as completed, fixing...")
+                                job_state['completed'] = False
+                    
+                    # Break the inner loop but maintain the job state
+                    job_active = False
+                    
+                    # Very important: Save the job_id in connect_message to ensure we request the same job
+                    if 'job_id' in connect_message:
+                        print(f"🔒 Preserving job_id {connect_message['job_id']} for reconnection")
+                    else:
+                        print("⚠️ Warning: No job_id in connect_message!")
+                    
+                    # Reset client internal completion flag to allow reconnection
+                    client.job_completed = False
+                    
+                    # Print waiting message
+                    print("⏳ SIMI Remote: Waiting 30 seconds before reconnection...")
+                    await client.send_status("Waiting 30 seconds before reconnection...")
+                    await asyncio.sleep(30)  # 30 seconds wait before reconnection
+                    
+                    # Explicitly force a clear connection setup
+                    print("🔄 SIMI Remote: Forcing fresh connection setup")
+                    client.attempt_count = 0
+                    client.is_connection_established = False
+                    
+                    # Check if is_job_stopped would prevent reconnection
+                    is_stopped = client.is_job_stopped()
+                    print(f"🔍 is_job_stopped() = {is_stopped}")
+                    if is_stopped:
+                        print("⚠️ WARNING: is_job_stopped() is True, which would prevent reconnection!")
+                        print("🛠️ Manually ensuring job can continue...")
+                        client.job_completed = False
+                    
+                    # Log reconnection attempt with job details
+                    await client.send_status(f"Reconnecting to central server for job {connect_message.get('job_id', 'unknown')}...")
+                    print(f"💫 SIMI Remote: Reconnection cycle starting for job {connect_message.get('job_id', 'unknown')}")
+                    
+                    # Force a new connection attempt to ensure we try to reconnect
+                    print("🔄 SIMI Remote: Forcing immediate reconnection attempt")
+                    success, new_websocket = await client.connect()
+                    if success:
+                        print("✅ Reconnection successful! Breaking to restart normal flow.")
+                    else:
+                        print("❌ Reconnection failed. Will retry in main loop.")
+                    
+                    # Force a new loop iteration by breaking out of this try block
+                    break
+                else:
+                    print("❌ SIMI Remote: Job failed or was interrupted")
+                    
+                    # Update the status in the app.state via the status_callback
+                    if client.status_callback:
+                        await client.status_callback.on_error("Job failed or was interrupted")
+                        print("❌ Job marked as failed in application state")
+                    
+                    # Break the inner loop without permanently stopping the job
+                    job_active = False
+                    
+                    print(f"⏳ SIMI Remote: Waiting {client.completion_wait_time} seconds before retry...")
+                    await client.send_status(f"Waiting {client.completion_wait_time} seconds before retry...")
+                    await asyncio.sleep(client.completion_wait_time)
+                    
+                    # Reset connection state for a fresh attempt
+                    client.reset_for_new_job()
+                    await client.send_status("💫 Reconnection cycle starting now...")
+                    print("💫 SIMI Remote: Reconnection cycle starting after error")
+                    
+                    # Force the client to reset its connection count for clean logging
+                    client.attempt_count = 0
+                    
+                    # Break the inner try/catch block to get back to the outer connection loop
+                    # This will go back to the while loop that calls client.connect()
+                    # The outer loop will continue since client.is_job_stopped() will be False again
+                    break
+                
+            except Exception as e:
+                await client.send_status(f"Unexpected error: {str(e)}")
+                # Connection lost or other error - wait and retry
+                client.is_connection_established = False
+                
+                # Wait 2 minutes if we had an established connection (job may have been running)
+                if client.is_connection_established:
+                    await client.send_status("Connection lost during job execution. Waiting for central to complete...")
+                    await asyncio.sleep(client.completion_wait_time)
+                else:
+                    # Quick retry if we never established connection
+                    await asyncio.sleep(client.retry_delay)
+    
+    async def handle_message(self, message_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Handle a message from the central site.
+        
+        Args:
+            message_type: Type of the message
+            payload: Message payload
+            
+        Returns:
+            Response payload (if any)
+        """
+        return await self.algorithm_instance.process_message(message_type, payload)
+    
+    async def process_method_message(self, method: str) -> None:
+        """
+        Process a method message from the central site.
+        
+        Args:
+            method: Method to use for the algorithm
+        """
+        self.method = method

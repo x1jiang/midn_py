@@ -10,7 +10,7 @@ import pandas as pd
 from typing import Dict, Any, List, Set, Optional, Type
 
 from common.algorithm.base import CentralAlgorithm
-from common.algorithm.protocol import create_message, parse_message, MessageType
+from common.algorithm.job_protocol import create_message, parse_message, ProtocolMessageType
 
 from ..websockets.connection_manager import ConnectionManager
 from .. import models
@@ -74,7 +74,7 @@ class BaseAlgorithmService(ABC):
                 if running_job_id and running_job_id != job_id:
                     # There's a DIFFERENT job running, send error response
                     error_message = create_message(
-                        MessageType.ERROR,
+                        ProtocolMessageType.ERROR,
                         message=f"Job {running_job_id} is already running. Please wait for completion.",
                         code="JOB_CONFLICT"
                     )
@@ -92,7 +92,7 @@ class BaseAlgorithmService(ABC):
             print(f"💥 Error handling message from site {site_id}: {e}")
             # Send error response to the site
             error_message = create_message(
-                MessageType.ERROR,
+                ProtocolMessageType.ERROR,
                 message=f"Error processing message: {str(e)}"
             )
             await self.manager.send_to_site(error_message, site_id)
@@ -108,7 +108,7 @@ class BaseAlgorithmService(ABC):
         """
         pass
     
-    async def send_to_all_sites(self, job_id: int, message_type: MessageType, **payload) -> None:
+    async def send_to_all_sites(self, job_id: int, message_type: ProtocolMessageType, **payload) -> None:
         """
         Send a message to all sites participating in a job.
         

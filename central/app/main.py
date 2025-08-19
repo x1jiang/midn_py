@@ -135,7 +135,7 @@ async def debug_send_stats_request(job_id: int):
         print(f"🔧 DEBUG STATS: Starting stats request for job {job_id}")
         
         from .services.algorithm_factory import AlgorithmServiceFactory
-        from common.algorithm.protocol import create_message
+        from common.algorithm.job_protocol import create_message
         
         if "SIMICE" not in AlgorithmServiceFactory._service_instances:
             return {"error": "SIMICE service instance not found"}
@@ -203,7 +203,7 @@ async def debug_send_updates(job_id: int):
         print(f"🔧 DEBUG UPDATES: Starting updates for job {job_id}")
         
         from .services.algorithm_factory import AlgorithmServiceFactory
-        from common.algorithm.protocol import create_message
+        from common.algorithm.job_protocol import create_message
         import numpy as np
         
         if "SIMICE" not in AlgorithmServiceFactory._service_instances:
@@ -807,7 +807,7 @@ async def route_websocket_message(site_id: str, data: str):
     try:
         # Parse message to determine which algorithm/job it belongs to
         import json
-        from common.algorithm.protocol import parse_message
+        from common.algorithm.job_protocol import parse_message
         
         print(f"📝 Router: Parsing message from site {site_id}")
         # parse_message returns a dictionary, not a tuple
@@ -827,6 +827,22 @@ async def route_websocket_message(site_id: str, data: str):
             try:
                 db_job = services.job_service.get_job(db, job_id=job_id)
                 if db_job:
+                    # Check if job is completed - reject connection if it is
+                    if db_job.status == "completed":
+                        print(f"🚫 Router: Job {job_id} is already completed, rejecting message from site {site_id}")
+                        # Send a rejection message to the site
+                        rejection_message = {
+                            "type": "error",
+                            "job_id": job_id,
+                            "message": f"Job {job_id} is already completed. No further processing needed."
+                        }
+                        await manager.send_to_site(json.dumps(rejection_message), site_id)
+                        
+                        # Also close the connection with the site
+                        await manager.disconnect_site(site_id)
+                        print(f"🔌 Router: Disconnected site {site_id} for completed job {job_id}")
+                        return
+                        
                     algorithm_name = (db_job.algorithm or "").upper()
                     print(f"🎯 Router: Found job {job_id}, algorithm: {algorithm_name}")
                     
@@ -837,6 +853,13 @@ async def route_websocket_message(site_id: str, data: str):
                     print(f"✅ Router: Message handled by {algorithm_name} service")
                 else:
                     print(f"❌ Router: Job {job_id} not found for message from site {site_id}")
+                    # Send a rejection message to the site
+                    rejection_message = {
+                        "type": "error",
+                        "job_id": job_id,
+                        "message": f"Job {job_id} not found. Connection rejected."
+                    }
+                    await manager.send_to_site(json.dumps(rejection_message), site_id)
             except Exception as e:
                 print(f"💥 Router: Error routing message from site {site_id}: {e}")
                 import traceback

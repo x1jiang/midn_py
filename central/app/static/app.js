@@ -2,6 +2,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize global job running state
   window.jobIsRunning = false;
   
+  // Keep the last selected file
+  const centralFileInput = document.querySelector('input[name="central_data_file"]');
+  if (centralFileInput) {
+    // Store file when selected
+    centralFileInput.addEventListener('change', () => {
+      const file = centralFileInput.files[0];
+      if (file) {
+        window.lastSelectedFile = file;
+      }
+    });
+  }
+  
   // Attach CSRF token from meta to all forms as hidden input if missing
   const meta = document.querySelector('meta[name="csrf-token"]');
   if (meta) {
@@ -342,7 +354,7 @@ document.addEventListener('DOMContentLoaded', () => {
         hasDisabledAttribute: submitButton.hasAttribute('disabled')
       });
       
-      // Also disable the job select dropdown and file input
+      // Also disable the job select dropdown but keep file input enabled
       const jobSelect = jobForm.querySelector('select[name="job_id"]');
       const fileInput = jobForm.querySelector('input[name="central_data_file"]');
       
@@ -351,10 +363,11 @@ document.addEventListener('DOMContentLoaded', () => {
         jobSelect.setAttribute('disabled', 'disabled');
       }
       
-      if (fileInput) {
-        fileInput.disabled = true;
-        fileInput.setAttribute('disabled', 'disabled');
-      }
+      // Keep file input enabled so it retains its value
+      // if (fileInput) {
+      //   fileInput.disabled = true;
+      //   fileInput.setAttribute('disabled', 'disabled');
+      // }
       
       // Add notification at the top of the form if it doesn't exist already
       if (!jobForm.querySelector('.alert-warning')) {
@@ -407,18 +420,12 @@ document.addEventListener('DOMContentLoaded', () => {
         hasDisabledAttribute: submitButton.hasAttribute('disabled')
       });
       
-      // Also enable the job select dropdown and file input
+      // Also enable the job select dropdown (file input stays enabled)
       const jobSelect = jobForm.querySelector('select[name="job_id"]');
-      const fileInput = jobForm.querySelector('input[name="central_data_file"]');
       
       if (jobSelect) {
         jobSelect.disabled = false;
         jobSelect.removeAttribute('disabled');
-      }
-      
-      if (fileInput) {
-        fileInput.disabled = false;
-        fileInput.removeAttribute('disabled');
       }
       
       // Remove any warning notifications
@@ -575,9 +582,9 @@ document.addEventListener('DOMContentLoaded', () => {
               }
             }
           } else {
-            // No running job, submit the form
-            startJobForm.removeEventListener('submit', arguments.callee);
-            startJobForm.submit();
+            // No running job, trigger job start but don't submit the form
+            // This prevents page reload and keeps the file selection
+            startJobWithoutSubmit(startJobForm);
           }
         })
         .catch(error => {
@@ -590,6 +597,49 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           alert('Error checking for running jobs: ' + error.message);
         });
+    });
+  }
+  
+  // Function to start job without form submission (to preserve file selection)
+  function startJobWithoutSubmit(form) {
+    const formData = new FormData(form);
+    
+    fetch('/gui/jobs/start', {
+      method: 'POST',
+      body: formData
+    })
+    .then(response => {
+      if (response.ok) {
+        // Job started successfully - just start monitoring without page reload
+        const jobId = formData.get('job_id');
+        if (jobId) {
+          // Show job status container
+          const jobStatusContainer = document.getElementById('job-status-container');
+          if (jobStatusContainer) {
+            jobStatusContainer.classList.remove('hidden');
+          }
+          
+          // Start monitoring the job
+          startJobMonitoring(jobId);
+          
+          // Disable submit button but keep file input enabled
+          disableJobStartButton();
+        }
+      } else {
+        throw new Error('Failed to start job');
+      }
+    })
+    .catch(error => {
+      console.error('Error starting job:', error);
+      alert('Error starting job: ' + error.message);
+      
+      // Re-enable submit button on error
+      const submitButton = form.querySelector('button[type="submit"]');
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.removeAttribute('disabled');
+        submitButton.textContent = 'Start';
+      }
     });
   }
   
