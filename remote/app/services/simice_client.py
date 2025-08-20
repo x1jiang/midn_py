@@ -101,7 +101,7 @@ class SIMICEClient(FederatedJobProtocolClient):
                                             data: np.ndarray, target_column: int, 
                                             job_id: int, initial_data: Dict[str, Any]) -> None:
         """
-        Handle SIMICE-specific computation.
+        Handle SIMICE-specific computation following R implementation.
         
         Args:
             client: Connection client
@@ -113,6 +113,33 @@ class SIMICEClient(FederatedJobProtocolClient):
         """
         await client.send_status("Starting SIMICE computation...")
         
+        # Wait for Initialize message from central server (R-style)
+        await client.send_status("Waiting for Initialize message from central server...")
+        
+        while True:
+            message = await client.receive_message(websocket)
+            if not message:
+                await client.send_status("Connection lost while waiting for Initialize message")
+                return
+                
+            message_type = message.get("message_type") or message.get("type")
+            instruction = message.get("instruction", "")
+            
+            if instruction == "Initialize":
+                # Initialize message received (R-style)
+                await client.send_status("Received Initialize message")
+                break
+            elif message_type == "request_data_summary":
+                # Legacy data summary request received
+                await client.send_status("Received legacy data summary request")
+                break
+            elif message_type == ProtocolMessageType.JOB_COMPLETED.value:
+                # Job completed before computation started
+                await client.send_status("Job completed before computation started")
+                return
+            else:
+                await client.send_status(f"Received unexpected message type: {message_type}, instruction: {instruction}")
+
         try:
             # Prepare the data for SIMICE
             simice_data = await self.algorithm_instance.prepare_data(
@@ -121,14 +148,26 @@ class SIMICEClient(FederatedJobProtocolClient):
                 self.is_binary
             )
             
-            # Send data summary to central
-            await client.send_status("Sending data summary to central...")
-            if not await client.send_message(websocket, ProtocolMessageType.DATA, 
-                                           job_id=job_id, data_summary=simice_data):
-                await client.send_status("Failed to send data summary")
-                return
-            
-            await client.send_status("Data summary sent, waiting for instructions...")
+            # Handle the first message appropriately
+            if instruction == "Initialize":
+                # Process R-style Initialize message
+                await self._handle_initialize_message(client, websocket, message, job_id)
+            else:
+                # Handle legacy data summary request
+                await client.send_status("Sending data summary to central...")
+                
+                # Create data summary message
+                data_summary_message = {
+                    "type": ProtocolMessageType.DATA_SUMMARY.value,
+                    "job_id": job_id,
+                    "data_summary": simice_data
+                }
+                
+                if not await client.send_message_dict(websocket, data_summary_message):
+                    await client.send_status("Failed to send data summary")
+                    return
+
+                await client.send_status("Data summary sent, waiting for instructions...")
             
             # Main SIMICE protocol loop
             while True:
@@ -150,7 +189,7 @@ class SIMICEClient(FederatedJobProtocolClient):
     async def _process_algorithm_message(self, client: ConnectionClient, websocket: Any, 
                                         message: Dict[str, Any]) -> bool:
         """
-        Process an algorithm-specific message.
+        Process an algorithm-specific message following R SIMICE implementation.
         
         Args:
             client: Connection client
@@ -162,11 +201,30 @@ class SIMICEClient(FederatedJobProtocolClient):
         """
         job_id = self.job_state.get("job_id")
         message_type = message.get("type")
+        instruction = message.get("instruction", "")
         
-        await client.send_status(f"Processing SIMICE message: {message_type}")
+        await client.send_status(f"Processing SIMICE message: {instruction or message_type}")
         
         try:
-            if message_type == "compute_statistics":
+            # Handle R-style instructions
+            if instruction == "Initialize":
+                await self._handle_initialize_message(client, websocket, message, job_id)
+                return True
+                
+            elif instruction == "Information":
+                await self._handle_information_message(client, websocket, message, job_id)
+                return True
+                
+            elif instruction == "Impute":
+                await self._handle_impute_message(client, websocket, message, job_id)
+                return True
+                
+            elif instruction == "End":
+                await self._handle_end_message(client, websocket, message, job_id)
+                return False  # End the processing loop
+                
+            # Handle legacy message types for backward compatibility
+            elif message_type == "compute_statistics":
                 await self._handle_compute_statistics(client, websocket, message, job_id)
                 return True
                 
@@ -201,13 +259,193 @@ class SIMICEClient(FederatedJobProtocolClient):
                 return False  # Exit processing loop
             
             else:
-                await client.send_status(f"Unknown message type: {message_type}")
+                await client.send_status(f"Unknown message type: {message_type}, instruction: {instruction}")
                 return True  # Continue processing
         
         except Exception as e:
             await client.send_status(f"Error processing message: {str(e)}")
             traceback.print_exc()
             return True  # Continue processing despite error
+
+    # R-style message handlers
+    
+    async def _handle_initialize_message(self, client: ConnectionClient, websocket: Any, 
+                                        message: Dict[str, Any], job_id: int) -> None:
+        """
+        Handle Initialize message from central (R-style).
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            message: Initialize message
+            job_id: Job ID
+        """
+        missing_variables = message.get("missing_variables", [])
+        await client.send_status(f"Received Initialize with {len(missing_variables)} missing variables")
+        
+        try:
+            # Store missing variables for processing
+            self.missing_variables = missing_variables
+            
+            # Prepare the algorithm instance with missing variables
+            await self.algorithm_instance.initialize_imputation(missing_variables)
+            
+            # Send acknowledgment back to central
+            response_message = {
+                "type": ProtocolMessageType.METHOD.value,
+                "job_id": job_id,
+                "instruction": "Initialize",
+                "status": "ready"
+            }
+            
+            await client.send_message_dict(websocket, response_message)
+            await client.send_status("Sent Initialize acknowledgment")
+            
+        except Exception as e:
+            await client.send_status(f"Error in Initialize: {str(e)}")
+            
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "instruction": "Initialize",
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
+
+    async def _handle_information_message(self, client: ConnectionClient, websocket: Any, 
+                                         message: Dict[str, Any], job_id: int) -> None:
+        """
+        Handle Information message from central (R-style).
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            message: Information message
+            job_id: Job ID
+        """
+        target_column_index = message.get("target_column_index")
+        method = message.get("method", "Gaussian")
+        
+        await client.send_status(f"Computing statistics for column {target_column_index} using {method}")
+        
+        try:
+            # Compute local statistics using the algorithm
+            stats = await self.algorithm_instance.compute_local_statistics(target_column_index, method)
+            
+            # Send statistics back to central
+            response_message = {
+                "type": ProtocolMessageType.DATA.value,
+                "job_id": job_id,
+                "instruction": "Information",
+                "target_column_index": target_column_index,
+                "method": method,
+                "statistics": stats
+            }
+            
+            await client.send_message_dict(websocket, response_message)
+            await client.send_status(f"Sent statistics for column {target_column_index}")
+            
+        except Exception as e:
+            await client.send_status(f"Error computing statistics: {str(e)}")
+            
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "instruction": "Information",
+                "target_column_index": target_column_index,
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
+
+    async def _handle_impute_message(self, client: ConnectionClient, websocket: Any, 
+                                    message: Dict[str, Any], job_id: int) -> None:
+        """
+        Handle Impute message from central (R-style).
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            message: Impute message
+            job_id: Job ID
+        """
+        target_column_index = message.get("target_column_index")
+        method = message.get("method", "Gaussian")
+        parameters = message.get("parameters", {})
+        
+        await client.send_status(f"Updating imputations for column {target_column_index} using {method}")
+        
+        try:
+            # Update local imputations using the computed parameters
+            await self.algorithm_instance.update_imputations(target_column_index, parameters, method)
+            
+            # Send confirmation back to central
+            response_message = {
+                "type": ProtocolMessageType.DATA.value,
+                "job_id": job_id,
+                "instruction": "Impute",
+                "target_column_index": target_column_index,
+                "status": "completed"
+            }
+            
+            await client.send_message_dict(websocket, response_message)
+            await client.send_status(f"Imputations updated for column {target_column_index}")
+            
+        except Exception as e:
+            await client.send_status(f"Error updating imputations: {str(e)}")
+            
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "instruction": "Impute",
+                "target_column_index": target_column_index,
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
+
+    async def _handle_end_message(self, client: ConnectionClient, websocket: Any, 
+                                 message: Dict[str, Any], job_id: int) -> None:
+        """
+        Handle End message from central (R-style).
+        
+        Args:
+            client: Connection client
+            websocket: WebSocket connection
+            message: End message
+            job_id: Job ID
+        """
+        await client.send_status("Received End message - finalizing SIMICE")
+        
+        try:
+            # Finalize the imputation process
+            await self.algorithm_instance.finalize_imputation()
+            
+            # Send acknowledgment back to central
+            response_message = {
+                "type": ProtocolMessageType.METHOD.value,
+                "job_id": job_id,
+                "instruction": "End",
+                "status": "completed"
+            }
+            
+            await client.send_message_dict(websocket, response_message)
+            await client.send_status("SIMICE algorithm completed")
+            
+        except Exception as e:
+            await client.send_status(f"Error in End: {str(e)}")
+            
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "instruction": "End",
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
+    
+    # Legacy message handlers (for backward compatibility)
     
     async def _handle_compute_statistics(self, client: ConnectionClient, websocket: Any, 
                                         message: Dict[str, Any], job_id: int) -> None:
@@ -231,26 +469,29 @@ class SIMICEClient(FederatedJobProtocolClient):
             
             # Send statistics back to central
             await client.send_status(f"Sending statistics for column {target_col_idx}")
-            await client.send_message(
-                websocket,
-                ProtocolMessageType.DATA,
-                job_id=job_id,
-                target_col_idx=target_col_idx,
-                method=method,
-                statistics=stats
-            )
+            
+            statistics_message = {
+                "type": ProtocolMessageType.STATISTICS.value,
+                "job_id": job_id,
+                "target_col_idx": target_col_idx,
+                "method": method,
+                "statistics": stats
+            }
+            
+            await client.send_message_dict(websocket, statistics_message)
             
         except Exception as e:
             await client.send_status(f"Error computing statistics: {str(e)}")
             
             # Send error back to central
-            await client.send_message(
-                websocket,
-                ProtocolMessageType.ERROR,
-                job_id=job_id,
-                target_col_idx=target_col_idx,
-                error=str(e)
-            )
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "target_col_idx": target_col_idx,
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
     
     async def _handle_update_imputations(self, client: ConnectionClient, websocket: Any, 
                                         message: Dict[str, Any], job_id: int) -> None:
@@ -273,14 +514,14 @@ class SIMICEClient(FederatedJobProtocolClient):
             updated_data = await self.algorithm_instance.update_imputations(target_col_idx, global_params)
             
             # Send confirmation back to central
-            await client.send_message(
-                websocket,
-                ProtocolMessageType.DATA,
-                job_id=job_id,
-                target_col_idx=target_col_idx,
-                status="completed",
-                message_subtype="imputation_updated"
-            )
+            update_message = {
+                "type": "imputation_updated",
+                "job_id": job_id,
+                "target_col_idx": target_col_idx,
+                "status": "completed"
+            }
+            
+            await client.send_message_dict(websocket, update_message)
             
             await client.send_status(f"Imputations updated for column {target_col_idx}")
             
@@ -288,13 +529,14 @@ class SIMICEClient(FederatedJobProtocolClient):
             await client.send_status(f"Error updating imputations: {str(e)}")
             
             # Send error back to central
-            await client.send_message(
-                websocket,
-                ProtocolMessageType.ERROR,
-                job_id=job_id,
-                target_col_idx=target_col_idx,
-                error=str(e)
-            )
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "target_col_idx": target_col_idx,
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
     
     async def _handle_get_final_data(self, client: ConnectionClient, websocket: Any, 
                                     message: Dict[str, Any], job_id: int) -> None:
@@ -325,13 +567,13 @@ class SIMICEClient(FederatedJobProtocolClient):
                         imputed_data[key] = df
             
             # Send the final data back to central
-            await client.send_message(
-                websocket,
-                ProtocolMessageType.DATA,
-                job_id=job_id,
-                message_subtype="final_data",
-                imputed_data=imputed_data
-            )
+            final_data_message = {
+                "type": "final_data",
+                "job_id": job_id,
+                "imputed_data": imputed_data
+            }
+            
+            await client.send_message_dict(websocket, final_data_message)
             
             await client.send_status(f"Sent final imputed data")
             
@@ -339,12 +581,13 @@ class SIMICEClient(FederatedJobProtocolClient):
             await client.send_status(f"Error getting final data: {str(e)}")
             
             # Send error response
-            await client.send_message(
-                websocket,
-                ProtocolMessageType.ERROR,
-                job_id=job_id,
-                error=str(e)
-            )
+            error_message = {
+                "type": ProtocolMessageType.ERROR.value,
+                "job_id": job_id,
+                "error": str(e)
+            }
+            
+            await client.send_message_dict(websocket, error_message)
     
     async def _handle_job_completed(self, client: ConnectionClient, websocket: Any, 
                                    message: Dict[str, Any]) -> None:
@@ -399,3 +642,13 @@ class SIMICEClient(FederatedJobProtocolClient):
         except Exception as e:
             print(f"Error in handle_message: {str(e)}")
             return {"error": str(e)}
+    
+    async def process_method_message(self, method: str) -> None:
+        """
+        Process a method message from the central site.
+        
+        Args:
+            method: Method to use for the algorithm (not used in SIMICE as it handles multiple methods)
+        """
+        print(f"🎯 SIMICE: Received method message: {method} (SIMICE handles multiple methods automatically)")
+        # SIMICE doesn't need to set a single method as it handles multiple target columns with different methods

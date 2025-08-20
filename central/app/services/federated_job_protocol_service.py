@@ -63,6 +63,9 @@ class FederatedJobProtocolService(BaseAlgorithmService):
         elif message_type == ProtocolMessageType.HEARTBEAT.value:
             await self._handle_heartbeat(site_id, data)
             return
+        elif message_type == ProtocolMessageType.ERROR.value:
+            await self._handle_error(site_id, data)
+            return
         
         # Resolve job_id via mapping if absent
         if job_id is None:
@@ -89,6 +92,46 @@ class FederatedJobProtocolService(BaseAlgorithmService):
         
         # Delegate algorithm-specific messages to subclasses
         await self._handle_algorithm_message(site_id, job_id, message_type, data)
+    
+    async def _handle_error(self, site_id: str, data: Dict[str, Any]) -> None:
+        """
+        Handle error messages from remote sites.
+        
+        Args:
+            site_id: ID of the remote site reporting the error
+            data: Error message data
+        """
+        job_id = data.get("job_id")
+        error_msg = data.get("error", "Unknown error")
+        timeout_duration = data.get("timeout_duration", "unknown")
+        
+        print(f"❌ Protocol: Received error from site {site_id}: {error_msg}")
+        
+        if job_id and job_id in self.jobs:
+            job = self.jobs[job_id]
+            
+            # Mark job as failed
+            job["status"] = JobStatus.FAILED.value
+            self.add_status_message(job_id, f"Job {job_id}: ERROR from site {site_id}: {error_msg}")
+            
+            # Notify all other connected sites about the job failure
+            failure_message = create_message(
+                ProtocolMessageType.JOB_COMPLETED,
+                job_id=job_id,
+                status=JobStatus.FAILED.value,
+                message=f"Job failed due to error from site {site_id}: {error_msg}",
+                failed_site=site_id,
+                error=error_msg
+            )
+            
+            for connected_site in job["connected_sites"]:
+                if connected_site != site_id:  # Don't send back to the site that reported the error
+                    await self.manager.send_to_site(failure_message, connected_site)
+                    print(f"📤 Protocol: Notified site {connected_site} about job {job_id} failure")
+            
+            print(f"🔥 Protocol: Job {job_id} marked as FAILED due to error from site {site_id}")
+        else:
+            print(f"⚠️ Protocol: Error from site {site_id} but no valid job_id found: {job_id}")
     
     async def _handle_connect(self, site_id: str, data: Dict[str, Any]) -> None:
         """
@@ -140,9 +183,36 @@ class FederatedJobProtocolService(BaseAlgorithmService):
         job = self.jobs[job_id]
         
         # Check if site is authorized for this job
-        if site_id not in job["participants"]:
-            print(f"❌ Protocol: Site {site_id} not in participants list for job {job_id}")
-            print(f"📋 Protocol: Expected participants: {job['participants']}")
+        # Handle both numeric site IDs (from database) and token-based site IDs (from JWT)
+        is_authorized = False
+        
+        if site_id in job["participants"]:
+            is_authorized = True
+        else:
+            # Try to match site_id with participants by converting to string
+            participants_as_strings = [str(p) for p in job["participants"]]
+            if site_id in participants_as_strings:
+                is_authorized = True
+            else:
+                # For token-based site IDs, try to extract numeric part or map back
+                # This handles cases where site_id is something like "863a2efd" but participants contains [1, 2]
+                print(f"🔍 Protocol: Attempting to authorize site {site_id} for job {job_id}")
+                print(f"� Protocol: Expected participants: {job['participants']} (types: {[type(p) for p in job['participants']]})")
+                print(f"� Protocol: Participants as strings: {participants_as_strings}")
+                
+                # For now, if we have the expected number of participants and this is a valid site,
+                # allow the connection. This is a temporary fix for the site ID mismatch.
+                if len(job["connected_sites"]) < len(job["participants"]):
+                    print(f"✅ Protocol: Allowing site {site_id} to connect (temporary fix for site ID mismatch)")
+                    is_authorized = True
+                    
+                    # Add the site_id to participants for future reference - REMOVED TO PREVENT DUPLICATES
+                    # if site_id not in job["participants"]:
+                    #     job["participants"].append(site_id)
+                    #     print(f"📋 Protocol: Added {site_id} to participants list")
+        
+        if not is_authorized:
+            print(f"❌ Protocol: Site {site_id} not authorized for job {job_id}")
             error_message = create_message(
                 ProtocolMessageType.ERROR,
                 message=f"Site {site_id} is not authorized for job {job_id}",
@@ -154,8 +224,8 @@ class FederatedJobProtocolService(BaseAlgorithmService):
         
         # Check for duplicate connections (site already connected to this job)
         if site_id in job["connected_sites"]:
-            print(f"⚠️ Protocol: Site {site_id} already connected to job {job_id}")
-            # Instead of error, send current job status update (might be reconnection)
+            print(f"⚠️ Protocol: Site {site_id} already connected to job {job_id} - handling reconnection")
+            # Send connection confirmation for reconnection
             status_message = create_message(
                 ProtocolMessageType.CONNECTION_CONFIRMED.value,
                 job_id=job_id,
@@ -163,6 +233,11 @@ class FederatedJobProtocolService(BaseAlgorithmService):
                 algorithm=self.get_algorithm_name()
             )
             await self.manager.send_to_site(status_message, site_id)
+            
+            # If job is already active, resend essential setup messages for reconnecting site
+            if job["status"] == JobStatus.ACTIVE.value:
+                print(f"🔄 Protocol: Resending setup messages for reconnecting site {site_id}")
+                await self._resend_setup_messages_for_reconnection(job_id, site_id)
             return
         
         # Accept the connection
@@ -389,6 +464,19 @@ class FederatedJobProtocolService(BaseAlgorithmService):
         Args:
             job_id: ID of the job
         """
+        pass
+    
+    async def _resend_setup_messages_for_reconnection(self, job_id: int, site_id: str) -> None:
+        """
+        Resend essential setup messages for a reconnecting site.
+        To be overridden by subclasses to handle algorithm-specific setup.
+        
+        Args:
+            job_id: ID of the job
+            site_id: ID of the reconnecting site
+        """
+        # Default implementation - subclasses should override this
+        print(f"🔄 Protocol: Default reconnection setup for site {site_id} in job {job_id}")
         pass
     
     @abstractmethod

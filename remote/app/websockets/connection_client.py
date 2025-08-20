@@ -252,20 +252,54 @@ class ConnectionClient:
             await self.send_status(f"Error sending message: {str(e)}")
             return False
     
-    async def receive_message(self, websocket: websockets.WebSocketClientProtocol) -> Optional[Dict[str, Any]]:
+    async def send_message_dict(self, websocket: websockets.WebSocketClientProtocol, 
+                               message_dict: Dict[str, Any]) -> bool:
+        """
+        Send a complete message dictionary to the central server.
+        
+        Args:
+            websocket: WebSocket connection
+            message_dict: Complete message dictionary to send
+            
+        Returns:
+            True if the message was sent successfully, False otherwise
+        """
+        try:
+            # Convert message dict to JSON string
+            message_str = json.dumps(message_dict)
+            
+            # Send message with timeout
+            await asyncio.wait_for(websocket.send(message_str), timeout=self.message_timeout)
+            
+            msg_type = message_dict.get('type', 'unknown')
+            await self.send_status(f"Sent {msg_type} message to central server")
+            return True
+            
+        except Exception as e:
+            await self.send_status(f"Error sending message: {str(e)}")
+            return False
+    
+    async def receive_message(self, websocket: websockets.WebSocketClientProtocol, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Receive a message from the central server.
         
         Args:
             websocket: WebSocket connection
+            timeout: Timeout in seconds, None for indefinite wait (like R implementation)
             
         Returns:
             Received message as dictionary, or None if an error occurred
         """
         try:
-            # Receive message with timeout
-            await self.send_status("Waiting for message from central server...")
-            message_str = await asyncio.wait_for(websocket.recv(), timeout=self.message_timeout)
+            # Use provided timeout or default to self.message_timeout
+            actual_timeout = timeout if timeout is not None else self.message_timeout
+            
+            if timeout is None:
+                await self.send_status("Waiting for message from central server (indefinite)...")
+                message_str = await websocket.recv()  # Wait indefinitely like R
+            else:
+                await self.send_status("Waiting for message from central server...")
+                message_str = await asyncio.wait_for(websocket.recv(), timeout=actual_timeout)
             
             # Parse message
             message = parse_message(message_str)
@@ -276,9 +310,14 @@ class ConnectionClient:
             return message
             
         except asyncio.TimeoutError:
-            await self.send_status(f"Timeout waiting for message from central server after {self.message_timeout}s")
-            self.is_connection_established = False
-            return None
+            if timeout is not None:
+                await self.send_status(f"Timeout waiting for message from central server after {actual_timeout}s")
+                # Don't mark connection as failed for explicit timeouts - let caller handle
+                return None
+            else:
+                await self.send_status(f"Timeout waiting for message from central server after {actual_timeout}s")
+                self.is_connection_established = False
+                return None
         except websockets.exceptions.ConnectionClosed as e:
             await self.send_status(f"Connection closed while waiting for message: {str(e)}")
             self.is_connection_established = False

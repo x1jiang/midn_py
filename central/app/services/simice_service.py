@@ -7,7 +7,7 @@ Uses core statistical functions for R-compliant computations.
 import asyncio
 import json
 import os
-import datetime
+from datetime import datetime
 import zipfile
 import numpy as np
 import pandas as pd
@@ -99,7 +99,7 @@ class SIMICEService(FederatedJobProtocolService):
     
     async def _handle_algorithm_message(self, site_id: str, job_id: int, message_type: str, data: Dict[str, Any]) -> None:
         """
-        Handle algorithm-specific messages for SIMICE.
+        Handle algorithm-specific messages for SIMICE following R implementation.
         
         Args:
             site_id: ID of the remote site
@@ -110,20 +110,31 @@ class SIMICEService(FederatedJobProtocolService):
         print(f"🎯 SIMICE: Processing {message_type} for job {job_id} from site {site_id}")
         
         try:
-            if message_type == ProtocolMessageType.DATA_READY.value:
-                await self._handle_data_ready(site_id, data)
-            elif message_type == ProtocolMessageType.DATA_SUMMARY.value:
-                await self._handle_data_summary(site_id, data)
-            elif message_type == ProtocolMessageType.STATISTICS.value:
-                await self._handle_statistics(site_id, data)
-            elif message_type == "imputation_updated":  # Custom type for SIMICE
-                await self._handle_imputation_updated(site_id, data)
-            elif message_type == "statistics_ready":  # Custom type for SIMICE
-                await self._handle_statistics_ready(site_id, data)
-            elif message_type == "final_data":  # Custom type for SIMICE
-                await self._handle_final_data(site_id, data)
+            # Handle R-style message responses
+            instruction = data.get('instruction', '')
+            
+            if instruction == "Information":
+                # Response to Information request with statistics
+                await self._handle_information_response(site_id, job_id, data)
+            elif instruction == "Impute":
+                # Response to Impute request (imputation completed)
+                await self._handle_impute_response(site_id, job_id, data)
+            elif instruction == "Initialize":
+                # Response to Initialize request
+                await self._handle_initialize_response(site_id, job_id, data)
+            elif instruction == "End":
+                # Response to End request
+                await self._handle_end_response(site_id, job_id, data)
             else:
-                print(f"⚠️ SIMICE: Unknown algorithm message type from site {site_id}: {message_type}")
+                # Handle legacy message types for backward compatibility
+                if message_type == "data_ready":
+                    await self._handle_data_ready(site_id, data)
+                elif message_type == "data_summary":
+                    await self._handle_data_summary(site_id, data)
+                elif message_type == "statistics":
+                    await self._handle_statistics(site_id, data)
+                else:
+                    print(f"⚠️ SIMICE: Unknown message from site {site_id}: {message_type}, instruction: {instruction}")
                 
         except Exception as e:
             print(f"💥 SIMICE: Error handling algorithm message from site {site_id}: {e}")
@@ -157,7 +168,7 @@ class SIMICEService(FederatedJobProtocolService):
         
         # Send additional algorithm parameters
         params_message = create_message(
-            ProtocolMessageType.ALGORITHM_PARAMETERS.value,
+            ProtocolMessageType.METHOD,
             job_id=job_id,
             algorithm="SIMICE",
             target_column_indexes=target_column_indexes,
@@ -1183,6 +1194,7 @@ class SIMICEService(FederatedJobProtocolService):
     async def _handle_algorithm_start(self, job_id: int) -> None:
         """
         Handle algorithm-specific start logic when all sites are ready.
+        Follows R SIMICE implementation pattern.
         
         Args:
             job_id: ID of the job
@@ -1192,20 +1204,468 @@ class SIMICEService(FederatedJobProtocolService):
             print(f"❌ SIMICE: Job {job_id} not found in _handle_algorithm_start")
             return
             
-        # Set up algorithm-specific parameters for computation
-        params = json.loads(job["parameters"]) if isinstance(job["parameters"], str) else job["parameters"]
+        print(f"🚀 SIMICE: Starting algorithm for job {job_id}")
+        self.add_status_message(job_id, "All sites ready - starting SIMICE algorithm")
         
-        # Prepare any additional algorithm-specific initialization
-        self.add_status_message(job_id, "Initializing SIMICE computation")
+        # Get algorithm parameters
+        algo_data = job['algorithm_data']
+        target_column_indexes = algo_data['target_column_indexes']
+        is_binary = algo_data['is_binary']
+        iteration_before_first_imputation = algo_data.get('iteration_before_first_imputation', 5)
+        iteration_between_imputations = algo_data.get('iteration_between_imputations', 3)
+        imputation_trials = algo_data.get('imputation_trials', 10)
         
-        # Request data summaries from all sites
-        request_message = create_message(
-            "request_data_summary",  # Custom message type for SIMICE
-            job_id=job_id
+        print(f"🎯 SIMICE: Target columns: {target_column_indexes}")
+        print(f"🏷️ SIMICE: Binary flags: {is_binary}")
+        print(f"🔄 SIMICE: Before first: {iteration_before_first_imputation}, Between: {iteration_between_imputations}, Trials: {imputation_trials}")
+        
+        # Initialize job state following R implementation
+        job['current_imputation'] = 0
+        job['current_iteration'] = 0
+        job['current_missing_var_idx'] = 0
+        job['missing_variables'] = target_column_indexes  # Store as mvar in R
+        job['variable_types'] = ["logistic" if is_binary[i] else "Gaussian" for i in range(len(is_binary))]
+        job['phase'] = 'initialization'
+        job['imputed_datasets'] = []  # Store M imputed datasets like R
+        
+        # Send "Initialize" message to all sites (following R pattern)
+        print(f"📤 SIMICE: Sending Initialize message with missing variables: {target_column_indexes}")
+        
+        initialize_message = create_message(
+            ProtocolMessageType.METHOD,
+            job_id=job_id,
+            instruction="Initialize",
+            missing_variables=target_column_indexes  # This is 'mvar' in R
         )
         
         # Send to all connected sites
         for site_id in job["connected_sites"]:
-            await self.manager.send_to_site(request_message, site_id)
+            await self.manager.send_to_site(initialize_message, site_id)
+            print(f"📤 SIMICE: Sent Initialize to site {site_id}")
+        
+        self.add_status_message(job_id, f"Sent initialization with {len(target_column_indexes)} missing variables to all sites")
+        
+        # Start the main SIMICE algorithm
+        await self._start_simice_main_loop(job_id)
+    
+    async def _start_simice_main_loop(self, job_id: int) -> None:
+        """
+        Start the main SIMICE algorithm loop following R implementation.
+        
+        Args:
+            job_id: ID of the job
+        """
+        job = self.jobs[job_id]
+        algo_data = job['algorithm_data']
+        
+        imputation_trials = algo_data['imputation_trials']  # M in R
+        iteration_before_first = algo_data['iteration_before_first_imputation']  # iter0 in R
+        iteration_between = algo_data['iteration_between_imputations']  # iter in R
+        
+        print(f"🔄 SIMICE: Starting main loop - {imputation_trials} imputations")
+        
+        # Main imputation loop (M imputations)
+        for m in range(imputation_trials):
+            job['current_imputation'] = m + 1
+            self.add_status_message(job_id, f"Starting imputation {m + 1}/{imputation_trials}")
+            print(f"📊 SIMICE: Imputation {m + 1}/{imputation_trials}")
             
-        self.add_status_message(job_id, "Requested data summaries from all sites")
+            # Determine number of iterations for this imputation
+            iterations_this_round = iteration_before_first if m == 0 else iteration_between
+            
+            # Iteration loop for this imputation
+            for it in range(iterations_this_round):
+                job['current_iteration'] = it + 1
+                print(f"🔄 SIMICE: Imputation {m + 1}, Iteration {it + 1}/{iterations_this_round}")
+                
+                # Process each missing variable
+                await self._process_all_missing_variables(job_id)
+            
+            # Save this imputation
+            await self._capture_imputation_snapshot(job_id)
+            
+        # Send "End" message to all sites
+        await self._send_end_message(job_id)
+        
+        # Complete the job
+        await self._complete_simice_job(job_id)
+    
+    async def _process_all_missing_variables(self, job_id: int) -> None:
+        """
+        Process all missing variables in sequence (following R implementation).
+        
+        Args:
+            job_id: ID of the job
+        """
+        job = self.jobs[job_id]
+        missing_variables = job['missing_variables']
+        variable_types = job['variable_types']
+        
+        # Process each missing variable (following R: for ( i in 1:l ))
+        for i, column_index in enumerate(missing_variables):
+            job['current_missing_var_idx'] = i
+            variable_type = variable_types[i]
+            
+            print(f"📊 SIMICE: Processing variable {i + 1}/{len(missing_variables)}: column {column_index} ({variable_type})")
+            self.add_status_message(job_id, f"Processing column {column_index} ({variable_type})")
+            
+            # Send "Information" message to get statistics (following R pattern)
+            await self._request_variable_statistics(job_id, column_index, variable_type)
+            
+            # Wait for all sites to respond with statistics
+            await self._wait_for_statistics_responses(job_id, column_index, variable_type)
+            
+            # Compute global parameters and send "Impute" message
+            await self._compute_and_send_imputation_parameters(job_id, column_index, variable_type)
+    
+    async def _request_variable_statistics(self, job_id: int, column_index: int, variable_type: str) -> None:
+        """
+        Send "Information" message to request statistics for a variable.
+        
+        Args:
+            job_id: ID of the job
+            column_index: Index of the variable to process
+            variable_type: Type of variable ("Gaussian" or "logistic")
+        """
+        job = self.jobs[job_id]
+        
+        # Reset statistics collection
+        job[f'statistics_{column_index}'] = {}
+        job[f'waiting_for_stats_{column_index}'] = set(job['connected_sites'])
+        
+        print(f"📤 SIMICE: Sending Information message for column {column_index} ({variable_type})")
+        
+        # Send "Information" message (following R pattern)
+        info_message = create_message(
+            ProtocolMessageType.DATA,
+            job_id=job_id,
+            instruction="Information",
+            method=variable_type,
+            target_column_index=column_index
+        )
+        
+        for site_id in job['connected_sites']:
+            await self.manager.send_to_site(info_message, site_id)
+            print(f"📤 SIMICE: Sent Information to site {site_id}")
+    
+    async def _send_end_message(self, job_id: int) -> None:
+        """
+        Send "End" message to all sites to terminate the algorithm.
+        
+        Args:
+            job_id: ID of the job
+        """
+        job = self.jobs[job_id]
+        
+        print(f"🏁 SIMICE: Sending End message to all sites")
+        
+        end_message = create_message(
+            ProtocolMessageType.METHOD,
+            job_id=job_id,
+            instruction="End"
+        )
+        
+        for site_id in job['connected_sites']:
+            await self.manager.send_to_site(end_message, site_id)
+            print(f"📤 SIMICE: Sent End to site {site_id}")
+    
+    async def _complete_simice_job(self, job_id: int) -> None:
+        """
+        Complete the SIMICE job and save results.
+        
+        Args:
+            job_id: ID of the job
+        """
+        print(f"🎉 SIMICE: Completing job {job_id}")
+        self.add_status_message(job_id, "SIMICE algorithm completed successfully")
+        
+        # Save final results
+        await self._save_final_results(job_id)
+        
+        # Notify job completion
+        await self.notify_job_completed(
+            job_id,
+            message='SIMICE imputation completed successfully'
+        )
+
+    async def _wait_for_statistics_responses(self, job_id: int, column_index: int, variable_type: str) -> None:
+        """
+        Wait for all sites to respond with statistics.
+        
+        Args:
+            job_id: ID of the job
+            column_index: Index of the variable being processed
+            variable_type: Type of variable ("Gaussian" or "logistic")
+        """
+        job = self.jobs[job_id]
+        waiting_key = f'waiting_for_stats_{column_index}'
+        
+        # Wait until all sites have responded
+        while waiting_key in job and len(job[waiting_key]) > 0:
+            await asyncio.sleep(0.1)  # Small delay to prevent busy waiting
+            
+        print(f"✅ SIMICE: Received all statistics for column {column_index}")
+
+    async def _compute_and_send_imputation_parameters(self, job_id: int, column_index: int, variable_type: str) -> None:
+        """
+        Compute global parameters and send "Impute" message.
+        
+        Args:
+            job_id: ID of the job
+            column_index: Index of the variable being processed
+            variable_type: Type of variable ("Gaussian" or "logistic")
+        """
+        job = self.jobs[job_id]
+        statistics = job[f'statistics_{column_index}']
+        
+        print(f"🧮 SIMICE: Computing global parameters for column {column_index} ({variable_type})")
+        
+        if variable_type == "Gaussian":
+            # Compute Gaussian parameters (following R implementation)
+            parameters = await self._compute_gaussian_parameters(statistics)
+        else:  # logistic
+            # Compute logistic regression parameters (following R implementation)
+            parameters = await self._compute_logistic_parameters(statistics)
+        
+        # Send "Impute" message with computed parameters
+        await self._send_impute_message(job_id, column_index, variable_type, parameters)
+
+    async def _compute_gaussian_parameters(self, statistics: dict) -> dict:
+        """
+        Compute Gaussian parameters from aggregated statistics.
+        
+        Args:
+            statistics: Dictionary of statistics from all sites
+            
+        Returns:
+            Dictionary containing Gaussian parameters
+        """
+        # Aggregate statistics following R implementation
+        total_n = 0
+        sum_xy = None
+        sum_xx = None
+        sum_yy = 0
+        
+        for site_id, site_stats in statistics.items():
+            n = site_stats.get('n', 0)
+            total_n += n
+            
+            if n > 0:
+                if sum_xy is None:
+                    sum_xy = np.array(site_stats['sum_xy'])
+                    sum_xx = np.array(site_stats['sum_xx'])
+                else:
+                    sum_xy += np.array(site_stats['sum_xy'])
+                    sum_xx += np.array(site_stats['sum_xx'])
+                sum_yy += site_stats['sum_yy']
+        
+        if total_n == 0:
+            return {'beta': [0], 'sigma_sq': 1}
+        
+        # Solve normal equations: XX * beta = XY
+        try:
+            beta = np.linalg.solve(sum_xx, sum_xy)
+            residual_ss = sum_yy - np.dot(sum_xy, beta)
+            sigma_sq = max(residual_ss / (total_n - len(beta)), 0.001)  # Prevent negative variance
+            
+            return {
+                'beta': beta.tolist(),
+                'sigma_sq': float(sigma_sq)
+            }
+        except np.linalg.LinAlgError:
+            print("⚠️ SIMICE: Singular matrix in Gaussian computation, using fallback")
+            return {'beta': [0] * len(sum_xy), 'sigma_sq': 1}
+
+    async def _compute_logistic_parameters(self, statistics: dict) -> dict:
+        """
+        Compute logistic regression parameters from aggregated statistics.
+        
+        Args:
+            statistics: Dictionary of statistics from all sites
+            
+        Returns:
+            Dictionary containing logistic parameters
+        """
+        # Aggregate statistics following R implementation
+        total_h = None
+        total_g = None
+        
+        for site_id, site_stats in statistics.items():
+            h = np.array(site_stats['H'])
+            g = np.array(site_stats['g'])
+            
+            if total_h is None:
+                total_h = h
+                total_g = g
+            else:
+                total_h += h
+                total_g += g
+        
+        if total_h is None:
+            return {'beta': [0]}
+        
+        # Solve: H * beta = g
+        try:
+            beta = np.linalg.solve(total_h, total_g)
+            return {'beta': beta.tolist()}
+        except np.linalg.LinAlgError:
+            print("⚠️ SIMICE: Singular matrix in logistic computation, using fallback")
+            return {'beta': [0] * len(total_g)}
+
+    async def _send_impute_message(self, job_id: int, column_index: int, variable_type: str, parameters: dict) -> None:
+        """
+        Send "Impute" message with computed parameters.
+        
+        Args:
+            job_id: ID of the job
+            column_index: Index of the variable being processed
+            variable_type: Type of variable
+            parameters: Computed parameters for imputation
+        """
+        job = self.jobs[job_id]
+        
+        print(f"📤 SIMICE: Sending Impute message for column {column_index}")
+        
+        # Reset response tracking
+        job[f'waiting_for_impute_{column_index}'] = set(job['connected_sites'])
+        
+        # Send "Impute" message (following R pattern)
+        impute_message = create_message(
+            ProtocolMessageType.DATA,
+            job_id=job_id,
+            instruction="Impute",
+            target_column_index=column_index,
+            method=variable_type,
+            parameters=parameters
+        )
+        
+        for site_id in job['connected_sites']:
+            await self.manager.send_to_site(impute_message, site_id)
+            print(f"📤 SIMICE: Sent Impute to site {site_id}")
+        
+        # Wait for imputation completion
+        await self._wait_for_imputation_completion(job_id, column_index)
+
+    async def _wait_for_imputation_completion(self, job_id: int, column_index: int) -> None:
+        """
+        Wait for all sites to complete imputation.
+        
+        Args:
+            job_id: ID of the job
+            column_index: Index of the variable being processed
+        """
+        job = self.jobs[job_id]
+        waiting_key = f'waiting_for_impute_{column_index}'
+        
+        # Wait until all sites have completed imputation
+        while waiting_key in job and len(job[waiting_key]) > 0:
+            await asyncio.sleep(0.1)
+            
+        print(f"✅ SIMICE: All sites completed imputation for column {column_index}")
+
+    async def _capture_imputation_snapshot(self, job_id: int) -> None:
+        """
+        Capture a snapshot of the current imputation state.
+        
+        Args:
+            job_id: ID of the job
+        """
+        job = self.jobs[job_id]
+        current_imputation = job['current_imputation']
+        
+        # In a real implementation, this would capture the imputed dataset
+        # For now, just log the completion
+        print(f"📸 SIMICE: Captured imputation snapshot {current_imputation}")
+        self.add_status_message(job_id, f"Completed imputation {current_imputation}")
+
+    async def _save_final_results(self, job_id: int) -> None:
+        """
+        Save final SIMICE results.
+        
+        Args:
+            job_id: ID of the job
+        """
+        job = self.jobs[job_id]
+        
+        # Save results to database or file system
+        print(f"💾 SIMICE: Saving final results for job {job_id}")
+        
+        # Placeholder for actual result saving
+        job['results'] = {
+            'status': 'completed',
+            'num_imputations': job.get('current_imputation', 0),
+            'missing_variables': job.get('missing_variables', []),
+            'completion_time': datetime.now().isoformat()
+        }
+
+    # R-style message handlers
+    
+    async def _handle_initialize_response(self, site_id: str, job_id: int, data: Dict[str, Any]) -> None:
+        """
+        Handle response to Initialize message.
+        
+        Args:
+            site_id: ID of the remote site
+            job_id: ID of the job
+            data: Message data
+        """
+        print(f"✅ SIMICE: Site {site_id} acknowledged Initialize for job {job_id}")
+        # Initialize response is typically just an acknowledgment
+
+    async def _handle_information_response(self, site_id: str, job_id: int, data: Dict[str, Any]) -> None:
+        """
+        Handle response to Information message with statistics.
+        
+        Args:
+            site_id: ID of the remote site
+            job_id: ID of the job
+            data: Message data containing statistics
+        """
+        job = self.jobs[job_id]
+        column_index = data.get('target_column_index')
+        statistics_key = f'statistics_{column_index}'
+        waiting_key = f'waiting_for_stats_{column_index}'
+        
+        print(f"📊 SIMICE: Received statistics from site {site_id} for column {column_index}")
+        
+        # Store statistics from this site
+        if statistics_key not in job:
+            job[statistics_key] = {}
+        job[statistics_key][site_id] = data.get('statistics', {})
+        
+        # Remove from waiting list
+        if waiting_key in job and site_id in job[waiting_key]:
+            job[waiting_key].remove(site_id)
+            print(f"✅ SIMICE: Site {site_id} statistics received, {len(job[waiting_key])} sites remaining")
+
+    async def _handle_impute_response(self, site_id: str, job_id: int, data: Dict[str, Any]) -> None:
+        """
+        Handle response to Impute message (imputation completed).
+        
+        Args:
+            site_id: ID of the remote site
+            job_id: ID of the job
+            data: Message data
+        """
+        job = self.jobs[job_id]
+        column_index = data.get('target_column_index')
+        waiting_key = f'waiting_for_impute_{column_index}'
+        
+        print(f"✅ SIMICE: Site {site_id} completed imputation for column {column_index}")
+        
+        # Remove from waiting list
+        if waiting_key in job and site_id in job[waiting_key]:
+            job[waiting_key].remove(site_id)
+            print(f"✅ SIMICE: Site {site_id} imputation completed, {len(job[waiting_key])} sites remaining")
+
+    async def _handle_end_response(self, site_id: str, job_id: int, data: Dict[str, Any]) -> None:
+        """
+        Handle response to End message.
+        
+        Args:
+            site_id: ID of the remote site
+            job_id: ID of the job
+            data: Message data
+        """
+        print(f"🏁 SIMICE: Site {site_id} acknowledged End for job {job_id}")
+        # End response is typically just an acknowledgment

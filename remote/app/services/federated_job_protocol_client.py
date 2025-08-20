@@ -89,7 +89,7 @@ class FederatedJobProtocolClient(BaseAlgorithmClient):
                 await client.send_status(f"Connected to central server for job {job_id}")
                 
                 # Send connection request
-                if not await client.send_message(websocket, connect_message):
+                if not await client.send_message_dict(websocket, connect_message):
                     await client.send_status("Failed to send connection request")
                     await asyncio.sleep(client.retry_delay)
                     continue
@@ -116,7 +116,7 @@ class FederatedJobProtocolClient(BaseAlgorithmClient):
                 # Send site_ready message
                 self.job_state["status"] = RemoteStatus.READY.value
                 site_ready_message = Protocol.create_site_ready_message(job_id, site_id)
-                if not await client.send_message(websocket, site_ready_message):
+                if not await client.send_message_dict(websocket, site_ready_message):
                     await client.send_status("Failed to send ready notification")
                     await asyncio.sleep(client.retry_delay)
                     continue
@@ -377,7 +377,7 @@ class FederatedJobProtocolClient(BaseAlgorithmClient):
             site_id=self.job_state["site_id"]
         )
         
-        if await client.send_message(websocket, ack_message):
+        if await client.send_message_dict(websocket, ack_message):
             await client.send_status("Sent completion acknowledgment to central server")
             self.job_state["completion_acknowledged"] = True
         else:

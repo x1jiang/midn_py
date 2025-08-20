@@ -11,7 +11,9 @@ import pandas as pd
 import zipfile
 from typing import Dict, Any, List, Set, Optional
 
-from common.algorithm.job_protocol import create_message, parse_message, ProtocolMessageType
+from common.algorithm.job_protocol import (
+    ProtocolMessageType, create_message, JobStatus
+)
 from .federated_job_protocol_service import FederatedJobProtocolService
 from .. import models
 from ..websockets.connection_manager import ConnectionManager
@@ -75,24 +77,9 @@ class SIMIService(FederatedJobProtocolService):
         job_status.add_message(f"Using {method} method for imputation")
         job_status.add_message(f"Waiting for participants to connect: {', '.join(self.jobs[job_id]['participants'])}")
         
-        try:
-            # Wait for all participants to connect
-            await self.wait_for_participants(job_id)
-            
-            # Update job status to active once all participants are connected
-            self.jobs[job_id]["status"] = "active"
-            
-            # Start the imputation process
-            await self.run_imputation(job_id, db_job)
-            
-            # Mark job as completed
-            self.add_status_message(job_id, f"Job {job_id}: Main workflow completed successfully")
-            self.job_status_tracker.complete_job(job_id)
-            
-        except Exception as e:
-            # Mark job as failed
-            self.job_status_tracker.fail_job(job_id, str(e))
-            raise
+        # With standardized protocol, we don't need to manually wait for participants or start imputation
+        # The protocol will handle connection management and trigger _handle_algorithm_start when ready
+        self.add_status_message(job_id, f"Job {job_id}: Waiting for all participants to connect via standardized protocol")
     
     async def _handle_algorithm_message(self, site_id: str, job_id: int, message_type: str, data: Dict[str, Any]) -> None:
         """
@@ -131,6 +118,29 @@ class SIMIService(FederatedJobProtocolService):
             print(f"📋 SIMI: Sites with data: {list(job['data'].keys())}")
             print(f"📋 SIMI: Expected participants: {job['participants']}")
             self.add_status_message(job_id, f"Received data from site {site_id} (n={float(data['n'])})")
+            
+            # Check if all sites have sent their Gaussian data
+            if len(job["data"]) >= len(job["participants"]):
+                print(f"✅ SIMI: All sites have sent Gaussian data - starting imputation")
+                self.add_status_message(job_id, f"All {len(job['participants'])} sites sent data - starting Gaussian imputation")
+                
+                # Start Gaussian imputation
+                try:
+                    # Find the db_job record to pass to run_imputation
+                    from .. import models
+                    from ..db import get_db
+                    db = next(get_db())
+                    db_job = db.query(models.Job).filter(models.Job.id == job_id).first()
+                    
+                    if db_job:
+                        asyncio.create_task(self.run_imputation(job_id, db_job))
+                        print(f"🚀 SIMI: Gaussian imputation task started for job {job_id}")
+                    else:
+                        print(f"❌ SIMI: Could not find database record for job {job_id}")
+                        self.add_status_message(job_id, f"ERROR: Could not find job record for imputation")
+                except Exception as e:
+                    print(f"❌ SIMI: Error starting Gaussian imputation: {str(e)}")
+                    self.add_status_message(job_id, f"ERROR: Failed to start imputation: {str(e)}")
         
         # Handle sample size messages (logistic regression)
         elif message_type == "n":
@@ -138,6 +148,20 @@ class SIMIService(FederatedJobProtocolService):
                 job["logit_n_by_site"] = {}
             job["logit_n_by_site"][site_id] = float(data["n"])
             self.add_status_message(job_id, f"Received sample size from site {site_id} (n={float(data['n'])})")
+            print(f"📊 SIMI: Received sample size from site {site_id}: n={float(data['n'])}")
+            
+            # Check if all sites have sent their sample sizes
+            expected_sites = set(job["participants"])
+            received_sites = set(job["logit_n_by_site"].keys())
+            print(f"📋 SIMI: Sample sizes received from: {received_sites}")
+            print(f"📋 SIMI: Expected participants: {expected_sites}")
+            
+            if received_sites >= expected_sites:  # All sites have sent sample sizes
+                print(f"✅ SIMI: All sites have sent sample sizes - starting logistic regression iterations")
+                self.add_status_message(job_id, f"All {len(expected_sites)} sites sent sample sizes - starting logistic regression")
+                
+                # Start logistic regression iterations
+                asyncio.create_task(self._start_logistic_regression(job_id))
         
         # Handle logistic regression iteration messages
         elif message_type in {"H", "g", "Q"}:
@@ -150,6 +174,7 @@ class SIMIService(FederatedJobProtocolService):
                 job["logit_buffers"][site_id][message_type] = float(data[message_type])
                 
             self.add_status_message(job_id, f"Received {message_type} from site {site_id}")
+            print(f"🔍 SIMI: Stored {message_type} from site {site_id}, buffers now: {list(job['logit_buffers'].keys())}")
             
             # Check if all participants have delivered required data for this iteration
             if job.get("logit_event") is not None:
@@ -207,6 +232,388 @@ class SIMIService(FederatedJobProtocolService):
                             f"Q={site_data.get('Q', 'N/A')}"
                         )
     
+    async def _handle_algorithm_start(self, job_id: int) -> None:
+        """
+        Handle SIMI algorithm start - send method to all sites.
+        
+        Args:
+            job_id: ID of the job
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return
+        
+        # Send method message to all connected sites
+        method = job.get("method", "gaussian")
+        print(f"🚀 SIMI: Starting algorithm with method: {method}")
+        
+        # Create method message
+        method_message = create_message(
+            ProtocolMessageType.METHOD,
+            job_id=job_id,
+            method=method
+        )
+        
+        # Send to all connected sites
+        for site_id in job["connected_sites"]:
+            await self.manager.send_to_site(method_message, site_id)
+            print(f"📤 SIMI: Sent method '{method}' to site {site_id}")
+    
+    async def _resend_setup_messages_for_reconnection(self, job_id: int, site_id: str) -> None:
+        """
+        Resend essential setup messages for a reconnecting site.
+        
+        Args:
+            job_id: ID of the job
+            site_id: ID of the reconnecting site
+        """
+        job = self.jobs.get(job_id)
+        if not job:
+            return
+        
+        print(f"🔄 SIMI: Resending setup messages for reconnecting site {site_id}")
+        
+        # Resend method message
+        method = job.get("method", "gaussian")
+        method_message = create_message(
+            ProtocolMessageType.METHOD,
+            job_id=job_id,
+            method=method
+        )
+        await self.manager.send_to_site(method_message, site_id)
+        print(f"📤 SIMI: Resent method '{method}' to reconnecting site {site_id}")
+        
+        # If the job is in computation phase, resend start_computation
+        if job["status"] == JobStatus.ACTIVE.value:
+            start_message = create_message(
+                ProtocolMessageType.START_COMPUTATION,
+                job_id=job_id
+            )
+            await self.manager.send_to_site(start_message, site_id)
+            print(f"📤 SIMI: Resent start_computation to reconnecting site {site_id}")
+            
+            # For logistic method, if we're in the middle of iterations, send current state
+            if method == "logistic":
+                current_mode = job.get("current_mode", 1)
+                print(f"🔄 SIMI: Job method is logistic, current_mode = {current_mode}")
+                print(f"🔍 SIMI: Job keys: {list(job.keys())}")
+                print(f"🔍 SIMI: Job status: {job.get('status')}")
+                print(f"🔍 SIMI: Job participants: {job.get('participants', [])}")
+                print(f"🔍 SIMI: Job ready_sites: {job.get('ready_sites', [])}")
+                
+                # Always send mode sync for logistic reconnections to help client decide
+                mode_sync_message = create_message(
+                    ProtocolMessageType.DATA,
+                    job_id=job_id,
+                    type="mode_sync",
+                    current_mode=current_mode,
+                    skip_initial=current_mode > 1,
+                    message=f"Job is in mode {current_mode}, skip_initial={current_mode > 1}"
+                )
+                print(f"📤 SIMI: Sending mode sync message to {site_id}: {mode_sync_message}")
+                await self.manager.send_to_site(mode_sync_message, site_id)
+                print(f"📤 SIMI: Sent mode sync (mode {current_mode}, skip_initial={current_mode > 1}) to reconnecting site {site_id}")
+                
+                # If we're in an active iteration, also send the current mode message
+                if current_mode > 0 and "current_beta" in job:
+                    current_beta = job["current_beta"]
+                    current_mode_message = create_message(
+                        ProtocolMessageType.MODE,
+                        job_id=job_id,
+                        mode=current_mode,
+                        beta=current_beta
+                    )
+                    print(f"📤 SIMI: Sending current mode {current_mode} message to reconnecting site {site_id}")
+                    await self.manager.send_to_site(current_mode_message, site_id)
+                    print(f"📤 SIMI: Sent current mode {current_mode} with beta to reconnecting site {site_id}")
+                elif current_mode == 0:
+                    # Send termination message
+                    current_mode_message = create_message(
+                        ProtocolMessageType.MODE,
+                        job_id=job_id,
+                        mode=0
+                    )
+                    print(f"📤 SIMI: Sending termination mode 0 to reconnecting site {site_id}")
+                    await self.manager.send_to_site(current_mode_message, site_id)
+                else:
+                    print(f"⚠️ SIMI: No current_beta found in job for mode {current_mode}, reconnecting site will wait for next iteration")
+        
+        # Add site to ready sites if not already there (they were ready before)
+        if site_id not in job["ready_sites"]:
+            job["ready_sites"].append(site_id)
+            print(f"✅ SIMI: Added reconnecting site {site_id} to ready sites")
+    
+    async def _start_logistic_regression(self, job_id: int) -> None:
+        """
+        Start the logistic regression iterations after all sites have sent sample sizes.
+        
+        Args:
+            job_id: ID of the job
+        """
+        job_info = self.jobs[job_id]
+        central_data = job_info["central_data"]
+        mvar = job_info["missing_spec"].get("target_column_index", 1) - 1
+        method = job_info["method"]
+        
+        print(f"🚀 SIMI: Starting logistic regression for job {job_id}")
+        self.add_status_message(job_id, f"Job {job_id}: Starting logistic regression iterations")
+        
+        # Prepare local data
+        miss = np.isnan(central_data.iloc[:, mvar].values)
+        X = central_data.loc[~miss, :].drop(central_data.columns[mvar], axis=1).values
+        y = central_data.loc[~miss, central_data.columns[mvar]].values
+        
+        # Iterative exchange with remotes
+        p = X.shape[1]
+        beta = np.zeros(p)
+        max_iter = 25
+        vcov_mat = None
+        convergence_history = []  # Track convergence history
+        q_values = []  # Track Q values across iterations
+        
+        # Log initial beta values
+        beta_str = " ".join([f"{b:.6f}" for b in beta])
+        self.add_status_message(job_id, f"Initial beta values = {beta_str}")
+        print(f"Initial beta values = {beta_str}")
+        
+        # Main iteration loop (following R implementation pattern)
+        iter_count = 0
+        for iter_count in range(1, max_iter + 1):
+            self.add_status_message(job_id, f"Job {job_id}: Starting logistic regression iteration {iter_count}/{max_iter}")
+            
+            # MODE 1: Newton-Raphson step (get H, g, Q from all sites)
+            # Reset iteration buffers and event
+            job_info["logit_buffers"] = {}
+            job_info["logit_event"] = asyncio.Event()
+            job_info["current_mode"] = 1
+            job_info["current_beta"] = beta.tolist()
+            
+            print(f"📊 SIMI: Iteration {iter_count} - Mode 1 (Newton-Raphson)")
+            
+            # Send mode 1 + beta to all sites
+            mode_message = create_message(
+                ProtocolMessageType.MODE,
+                job_id=job_id,
+                mode=1,
+                beta=beta.tolist()
+            )
+            
+            for site_id in job_info["connected_sites"]:
+                await self.manager.send_to_site(mode_message, site_id)
+                print(f"📤 SIMI: Sent mode 1 message to site {site_id}")
+                self.add_status_message(job_id, f"Sent mode 1 to site {site_id} - expecting H,g,Q response")
+            
+            # Local (central) contributions for mode 1
+            xb = X @ beta
+            pr = 1.0 / (1.0 + np.exp(-xb))
+            pr = np.clip(pr, 1e-15, 1 - 1e-15)
+            
+            # Add regularization parameter
+            N = len(y) + sum(job_info["logit_n_by_site"].values())  # Total sample size across all sites
+            lam = 1e-3
+            
+            w = pr * (1 - pr)
+            H_local = (X.T * w) @ X + lam * N * np.eye(p)
+            g_local = X.T @ (y - pr) - lam * N * beta
+            Q_local = float(np.sum(y * xb) + np.sum(np.log(1 - pr[pr < 0.5])) + 
+                          np.sum(np.log(pr[pr >= 0.5]) - xb[pr >= 0.5]) - 
+                          lam * N * np.sum(beta**2) / 2)
+            
+            # Wait for remotes to respond with H, g, Q
+            try:
+                self.add_status_message(job_id, f"Waiting for all sites to report H,g,Q (timeout: 60s)")
+                await asyncio.wait_for(job_info["logit_event"].wait(), timeout=60.0)
+                print(f"✅ SIMI: All sites responded for mode 1")
+                
+            except asyncio.TimeoutError:
+                error_msg = f"Timeout waiting for sites to respond in mode 1 of iteration {iter_count}"
+                print(f"❌ SIMI: {error_msg}")
+                self.add_status_message(job_id, f"ERROR: {error_msg}")
+                
+                # Mark job as failed and notify all sites
+                job_info["status"] = JobStatus.FAILED.value
+                failure_message = create_message(
+                    ProtocolMessageType.JOB_COMPLETED,
+                    job_id=job_id,
+                    status=JobStatus.FAILED.value,
+                    message=error_msg
+                )
+                
+                for site_id in job_info["connected_sites"]:
+                    await self.manager.send_to_site(failure_message, site_id)
+                
+                return
+            
+            # Aggregate results from mode 1
+            H_total = H_local.copy()
+            g_total = g_local.copy()
+            Q_total = Q_local
+            
+            for site_id in job_info["participants"]:
+                buf = job_info["logit_buffers"].get(site_id, {})
+                if 'H' in buf:
+                    H_total += buf['H']
+                if 'g' in buf:
+                    g_total += buf['g']
+                if 'Q' in buf:
+                    Q_total += buf['Q']
+            
+            # Calculate search direction
+            try:
+                direction = np.linalg.solve(H_total, g_total)
+            except np.linalg.LinAlgError:
+                direction = 0.01 * g_total
+            
+            m = np.dot(direction, g_total)  # Gradient in search direction
+            
+            # LINE SEARCH using MODE 2 (following R implementation)
+            step = 1.0
+            line_search_iter = 0
+            max_line_search = 20
+            
+            while line_search_iter < max_line_search:
+                line_search_iter += 1
+                nbeta = beta + step * direction
+                
+                # Check for convergence based on step size
+                if np.max(np.abs(nbeta - beta)) < 1e-5:
+                    print(f"📏 SIMI: Line search converged with step size {step:.6f}")
+                    break
+                
+                # MODE 2: Line search evaluation (get only Q from all sites)
+                job_info["logit_buffers"] = {}
+                job_info["logit_event"] = asyncio.Event()
+                job_info["current_mode"] = 2
+                job_info["current_beta"] = nbeta.tolist()
+                
+                print(f"� SIMI: Line search step {line_search_iter} with step size {step:.6f}")
+                
+                # Send mode 2 + nbeta to all sites
+                mode_message = create_message(
+                    ProtocolMessageType.MODE,
+                    job_id=job_id,
+                    mode=2,
+                    beta=nbeta.tolist()
+                )
+                
+                for site_id in job_info["connected_sites"]:
+                    await self.manager.send_to_site(mode_message, site_id)
+                    print(f"� SIMI: Sent mode 2 (line search) to site {site_id}")
+                
+                # Local Q calculation for nbeta
+                xb_new = X @ nbeta
+                pr_new = 1.0 / (1.0 + np.exp(-xb_new))
+                pr_new = np.clip(pr_new, 1e-15, 1 - 1e-15)
+                
+                Q_new_local = float(np.sum(y * xb_new) + np.sum(np.log(1 - pr_new[pr_new < 0.5])) + 
+                                  np.sum(np.log(pr_new[pr_new >= 0.5]) - xb_new[pr_new >= 0.5]) - 
+                                  lam * N * np.sum(nbeta**2) / 2)
+                
+                # Wait for remotes to respond with Q only
+                try:
+                    await asyncio.wait_for(job_info["logit_event"].wait(), timeout=60.0)
+                    print(f"✅ SIMI: All sites responded for mode 2 (line search)")
+                    
+                except asyncio.TimeoutError:
+                    error_msg = f"Timeout in line search mode 2 of iteration {iter_count}"
+                    print(f"❌ SIMI: {error_msg}")
+                    self.add_status_message(job_id, f"ERROR: {error_msg}")
+                    
+                    # Mark job as failed and notify all sites
+                    job_info["status"] = JobStatus.FAILED.value
+                    failure_message = create_message(
+                        ProtocolMessageType.JOB_COMPLETED,
+                        job_id=job_id,
+                        status=JobStatus.FAILED.value,
+                        message=error_msg
+                    )
+                    
+                    for site_id in job_info["connected_sites"]:
+                        await self.manager.send_to_site(failure_message, site_id)
+                    
+                    return
+                
+                # Aggregate Q values from mode 2
+                Q_new_total = Q_new_local
+                for site_id in job_info["participants"]:
+                    buf = job_info["logit_buffers"].get(site_id, {})
+                    if 'Q' in buf:
+                        Q_new_total += buf['Q']
+                
+                # Check Armijo condition for line search
+                if Q_new_total - Q_total > m * step / 2:
+                    print(f"📈 SIMI: Line search successful: Q improved from {Q_total:.6f} to {Q_new_total:.6f}")
+                    break
+                
+                # Reduce step size
+                step = step / 2
+                print(f"📉 SIMI: Reducing step size to {step:.6f}")
+            
+            # Check for convergence based on parameter change
+            if np.max(np.abs(nbeta - beta)) < 1e-5:
+                self.add_status_message(job_id, f"Job {job_id}: Convergence achieved after {iter_count} iterations")
+                print(f"✅ SIMI: Converged after {iter_count} iterations")
+                beta = nbeta
+                break
+            
+            # Update beta for next iteration
+            beta = nbeta
+            
+            # Track convergence
+            delta_norm = np.linalg.norm(beta - (beta - step * direction))
+            convergence_history.append(delta_norm)
+            q_values.append(Q_new_total)
+            
+            # Log iteration results
+            beta_str = " ".join([f"{b:.6f}" for b in beta])
+            iter_detail = f"Iteration {iter_count}: Q = {Q_new_total:.6f}, beta = {beta_str}"
+            self.add_status_message(job_id, iter_detail)
+            print(f"ITERATION {iter_count}/{max_iter}: Q = {Q_new_total:.6f}, DELTA = {delta_norm:.6f}")
+        
+        # Send mode 0 to terminate all sites
+        print(f"🏁 SIMI: Sending termination signal (mode 0) to all sites")
+        job_info["current_mode"] = 0
+        
+        mode_message = create_message(
+            ProtocolMessageType.MODE,
+            job_id=job_id,
+            mode=0
+        )
+        
+        for site_id in job_info["connected_sites"]:
+            await self.manager.send_to_site(mode_message, site_id)
+            print(f"📤 SIMI: Sent mode 0 (termination) to site {site_id}")
+        
+        # Calculate final covariance matrix
+        vcov_mat = np.linalg.pinv(H_total)
+        
+        # Store final results in job_info for imputation
+        job_info["final_beta"] = beta
+        job_info["final_vcov"] = vcov_mat
+        job_info["convergence_history"] = convergence_history
+        job_info["q_values"] = q_values
+        
+        print(f"🏁 SIMI: Logistic regression completed for job {job_id} after {iter_count} iterations")
+        
+        # Now trigger the imputation process
+        print(f"🚀 SIMI: Starting imputation process for job {job_id}")
+        try:
+            # Find the db_job record to pass to run_imputation
+            from .. import models
+            from ..db import get_db
+            db = next(get_db())
+            db_job = db.query(models.Job).filter(models.Job.id == job_id).first()
+            
+            if db_job:
+                await self.run_imputation(job_id, db_job)
+                print(f"✅ SIMI: Imputation completed for job {job_id}")
+            else:
+                print(f"❌ SIMI: Could not find database record for job {job_id}")
+                self.add_status_message(job_id, f"ERROR: Could not find job record for imputation")
+        except Exception as e:
+            print(f"❌ SIMI: Error during imputation: {str(e)}")
+            self.add_status_message(job_id, f"ERROR: Imputation failed: {str(e)}")
+
     async def run_imputation(self, job_id: int, db_job: models.Job) -> None:
         """
         Run the imputation algorithm.
@@ -241,16 +648,17 @@ class SIMIService(FederatedJobProtocolService):
                 'yy': float(np.sum(y ** 2)),
             }
             
-            # Wait for all remote sites to provide their stats
-            self.add_status_message(job_id, f"Job {job_id}: Waiting for all sites to send Gaussian statistics")
-            print(f"🔄 SIMI: Starting wait loop - Current data count: {len(job_info['data'])}/{len(job_info['participants'])}")
+            # All remote sites should have already provided their stats
+            print(f"🔄 SIMI: Processing Gaussian data - Current data count: {len(job_info['data'])}/{len(job_info['participants'])}")
             print(f"📋 SIMI: Sites with data: {list(job_info['data'].keys())}")
             print(f"📋 SIMI: Expected participants: {job_info['participants']}")
             
-            while len(job_info["data"]) < len(job_info["participants"]):
-                print(f"⏳ SIMI: Still waiting - {len(job_info['data'])}/{len(job_info['participants'])} sites have sent data")
-                await asyncio.sleep(0.5)
-            self.add_status_message(job_id, f"Job {job_id}: Received data from all {len(job_info['participants'])} sites")
+            if len(job_info["data"]) < len(job_info["participants"]):
+                print(f"❌ SIMI: Not all sites have sent data yet - {len(job_info['data'])}/{len(job_info['participants'])}")
+                self.add_status_message(job_id, f"ERROR: Missing data from some sites")
+                return
+            
+            self.add_status_message(job_id, f"Job {job_id}: Processing Gaussian data from all {len(job_info['participants'])} sites")
             
             # Make sure algorithm has the correct method before aggregating
             self.algorithm.method = method
@@ -261,335 +669,32 @@ class SIMIService(FederatedJobProtocolService):
             # Run imputation
             imputed_dfs = await self.algorithm.impute(central_data, mvar, aggregated_data, method)
             
-        else:  # Logistic method
-            # Iterative exchange with remotes
-            p = X.shape[1]
-            beta = np.zeros(p)
-            max_iter = 25
-            vcov_mat = None
-            convergence_history = []  # Track convergence history
-            q_values = []  # Track Q values across iterations
+        else:  # Logistic method  
+            # For logistic method, the results should already be available
+            # since run_imputation is called directly from _start_logistic_regression
             
-            # Log initial beta values
-            beta_str = " ".join([f"{b:.6f}" for b in beta])
-            self.add_status_message(job_id, f"Initial beta values = {beta_str}")
-            print(f"Initial beta values = {beta_str}")
+            print(f"🔄 SIMI: Checking for logistic regression results...")
             
-            for mode in range(1, max_iter + 1):
-                # Reset iteration buffers and event
-                job_info["logit_buffers"] = {}
-                job_info["logit_event"] = asyncio.Event()
+            # Check if results are available
+            if "final_beta" in job_info and "final_vcov" in job_info:
+                # Results are available, create aggregated data for imputation
+                beta = job_info["final_beta"]
+                vcov_mat = job_info["final_vcov"]
                 
-                # Store current mode in job_info for access elsewhere
-                job_info["current_mode"] = mode
-                self.add_status_message(job_id, f"Job {job_id}: Starting logistic regression iteration {mode}/{max_iter}")
+                print(f"✅ SIMI: Found logistic regression results - beta shape: {np.array(beta).shape}")
                 
-                # Send mode + beta to all sites
-                await self.send_to_all_sites(
-                    job_id,
-                    ProtocolMessageType.MODE,
-                    mode=mode,
-                    beta=beta.tolist()
-                )
+                aggregated_data = {
+                    "beta": np.array(beta),
+                    "vcov": vcov_mat
+                }
                 
-                # Local (central) contributions
-                xb = X @ beta
-                pr = 1.0 / (1.0 + np.exp(-xb))
-                pr = np.clip(pr, 1e-15, 1 - 1e-15)
-                
-                # The algorithm behaves differently depending on the mode
-                if mode == 1:
-                    # First mode: Full Newton-Raphson step
-                    w = pr * (1 - pr)
-                    H_local = (X.T * w) @ X
-                    g_local = X.T @ (y - pr)
-                    Q_local = float(np.sum(y * np.log(pr) + (1 - y) * np.log(1 - pr)))
-                else:
-                    # Mode 2+: Line search - we only need Q for these iterations
-                    Q_local = float(np.sum(y * np.log(pr) + (1 - y) * np.log(1 - pr)))
-                    # We'll still use these placeholders but they won't be used
-                    H_local = None
-                    g_local = None
-                
-                # Wait for remotes to respond
-                try:
-                    # Increase timeout to 30 seconds for logistic regression iterations
-                    self.add_status_message(job_id, f"Waiting for all sites to report data (timeout: 30s)")
-                    
-                    # Log the current status of responses
-                    received_sites = list(job_info["logit_buffers"].keys())
-                    waiting_sites = [site for site in job_info["participants"] if site not in job_info["logit_buffers"]]
-                    print(f"Mode {mode} - Received data from sites: {received_sites}")
-                    print(f"Mode {mode} - Waiting for sites: {waiting_sites}")
-                    
-                    # Add more detailed status message
-                    if waiting_sites:
-                        self.add_status_message(job_id, f"Mode {mode}: Waiting for sites: {', '.join(waiting_sites)}")
-                    
-                    # Wait with increased timeout
-                    await asyncio.wait_for(job_info["logit_event"].wait(), timeout=30)
-                    
-                except asyncio.TimeoutError:
-                    # Log more debug information
-                    received_sites = list(job_info["logit_buffers"].keys())
-                    missing_sites = [site for site in job_info["participants"] if site not in job_info["logit_buffers"]]
-                    print(f"TIMEOUT - Mode {mode} - Received data from sites: {received_sites}")
-                    print(f"TIMEOUT - Mode {mode} - Missing data from sites: {missing_sites}")
-                    
-                    # Check if we have at least some data
-                    if len(job_info["logit_buffers"]) > 0:
-                        self.add_status_message(job_id, f"Proceeding with partial data (missing {len(missing_sites)} sites)")
-                        print(f"Proceeding with partial data from {len(job_info['logit_buffers'])} sites")
-                        # Continue with the data we have
-                    else:
-                        raise RuntimeError(f"Timeout waiting for ANY responses from remotes in mode {mode} (30s timeout)")
-                
-                                # Log what data we've received from each site
-                site_data_summary = []
-                
-                # Check if all sites have reported complete data
-                all_reported = True
-                for site_id in job_info["participants"]:
-                    buf = job_info["logit_buffers"].get(site_id, {})
-                    # Check if we have all required data
-                    if mode == 1 and ('H' not in buf or 'g' not in buf or 'Q' not in buf):
-                        all_reported = False
-                    elif mode > 1 and 'Q' not in buf:
-                        all_reported = False
-                        
-                    # Prepare status summary
-                    try:
-                        h_status = f"H[{buf['H'].shape[0]}x{buf['H'].shape[1]}]" if 'H' in buf else "H[0x0]"
-                        g_status = f"g[{len(buf['g'])}]" if 'g' in buf else "g[0]"
-                        q_status = f"Q={buf['Q']}" if 'Q' in buf else "Q=N/A"
-                    except (KeyError, AttributeError):
-                        h_status = "H[0x0]"
-                        g_status = "g[0]"
-                        q_status = "Q=N/A"
-                        
-                    site_data_summary.append(f"Site {site_id} data: {h_status}, {g_status}, {q_status}")
-                
-                # Add status message about what data we've received
-                if all_reported:
-                    self.add_status_message(job_id, f"Job {job_id}: All sites reported complete data for mode {mode}")
-                else:
-                    self.add_status_message(job_id, f"Job {job_id}: All sites reported (some data incomplete) for mode {mode}")
-                
-                for summary in site_data_summary:
-                    self.add_status_message(job_id, summary)
-                
-                # Aggregate
-                
-                # Add status message about what data we've received
-                if all_reported:
-                    self.add_status_message(job_id, f"Job {job_id}: All sites reported complete data for mode {mode}")
-                else:
-                    self.add_status_message(job_id, f"Job {job_id}: All sites reported (some data incomplete) for mode {mode}")
-                
-                for summary in site_data_summary:
-                    self.add_status_message(job_id, summary)
-                
-                # Aggregate
-                Q_total = Q_local
-                
-                # Only use H and g for mode 1 (they're None for mode 2+)
-                if mode == 1:
-                    H_total = H_local.copy()
-                    g_total = g_local.copy()
-                    
-                    for site_id in job_info["participants"]:
-                        buf = job_info["logit_buffers"].get(site_id, {})
-                        if 'H' in buf:
-                            H_total += buf['H']
-                        if 'g' in buf:
-                            g_total += buf['g']
-                        if 'Q' in buf:
-                            Q_total += buf['Q']
-                else:
-                    # For mode 2+, only aggregate Q values
-                    for site_id in job_info["participants"]:
-                        buf = job_info["logit_buffers"].get(site_id, {})
-                        if 'Q' in buf:
-                            Q_total += buf['Q']
-                    
-                    # Set placeholders for H and g (needed below)
-                    H_total = np.zeros((p, p))
-                    g_total = np.zeros(p)
-                
-                # Update beta
-                lam = 1e-3  # Regularization
-                H_reg = H_total + lam * np.eye(p)
-                
-                try:
-                    delta_beta = np.linalg.solve(H_reg, g_total)
-                except np.linalg.LinAlgError:
-                    delta_beta = 0.01 * g_total
-                
-                beta = beta + delta_beta
-                vcov_mat = np.linalg.pinv(H_reg)
-                
-                # Check convergence
-                delta_norm = np.linalg.norm(delta_beta)
-                convergence_history.append(delta_norm)
-                
-                # Store convergence history in job info for later use
-                job_info["convergence_history"] = convergence_history
-                
-                # Format beta coefficients for display exactly as requested
-                beta_str = " ".join([f"{b:.6f}" for b in beta])
-                
-                # Store Q value for each iteration
-                q_values.append(Q_total)
-                job_info["q_values"] = q_values
-                
-                # After mode 2 completes, tell the clients they can reconnect
-                if mode == 2:
-                    # Mark job as ready but without duplicating the "Results ready" message
-                    job_info["results_ready"] = True
-                    self.add_status_message(job_id, f"✓ Results ready: Click the \"Download Results\" button to download the imputed dataset.")
-                    
-                    # Create the relative path for the download URL early to include in message
-                    import datetime
-                    import os
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    results_dir = os.path.join("static", "results") 
-                    relative_zip_path = os.path.join(results_dir, f"job_{job_id}_{timestamp}.zip")
-                    
-                    # Mark job as completed in the status tracker
-                    result = {"imputed_dataset_path": relative_zip_path}
-                    try:
-                        # Set flag to indicate we're completing early
-                        job_info["early_completion"] = True
-                        
-                        # Update database by executing a direct update query instead of modifying the object
-                        # This avoids the "already attached to session" error
-                        from ..db import get_db
-                        from sqlalchemy import text
-                        db = next(get_db())
-                        
-                        # Execute direct SQL update instead of modifying the object
-                        db.execute(text(f"UPDATE jobs SET status = 'completed' WHERE id = {job_id}"))
-                        db.commit()
-                        print(f"✅ SIMI: Job {job_id} marked as completed in database after mode 2")
-                        
-                        # Mark job as complete in the status tracker
-                        self.job_status_tracker.complete_job(job_id, result)
-                        print(f"✅ SIMI: Job {job_id} marked as completed in status tracker after mode 2")
-                        
-                        # IMPORTANT: Remove job from the jobs dictionary immediately
-                        # This prevents further reconnections from being accepted
-                        print(f"🧹 SIMI: Removing job {job_id} from state after mode 2 completion")
-                        self.jobs.pop(job_id, None)
-                        print(f"✅ SIMI: Job {job_id} removed from state")
-                        
-                        # Also disconnect all connected sites immediately to prevent further processing
-                        print(f"🔌 SIMI: Disconnecting all sites for job {job_id}")
-                        for site_id in job_info.get('connected_sites', []):
-                            await self.manager.disconnect_site(site_id)
-                        print(f"✅ SIMI: All sites disconnected")
-                    except Exception as e:
-                        print(f"❌ SIMI: Error updating database: {str(e)}")
-                    
-                        # Send completion notification to sites
-                        try:
-                            completion_message = create_message(
-                                "job_completed",
-                                job_id=job_id,
-                                status='completed',
-                                message='SIMI mode 2 completed successfully',
-                                result_path=relative_zip_path
-                            )
-                            for site_id in job_info.get('connected_sites', []):
-                                await self.manager.send_to_site(completion_message, site_id)
-                                print(f"✅ SIMI: Sent completion notification to site {site_id}")
-                                
-                                # Also close the connection with the site
-                                await self.manager.disconnect_site(site_id)
-                                print(f"✅ SIMI: Closed connection with site {site_id}")
-                        except Exception as e:
-                            print(f"❌ SIMI: Error during completion processing: {str(e)}")                # Log detailed iteration information including Q and beta values
-                # Match the exact format requested: "Iteration N: Q = X, beta = X X X..."
-                iter_detail = f"Iteration {mode}: Q = {Q_total:.6f}, beta = {beta_str}"
-                self.add_status_message(job_id, iter_detail)
-                
-                # Also print the iteration details to the console for debugging
-                print(f"ITERATION {mode}/{max_iter}: Q = {Q_total:.6f}, DELTA = {delta_norm:.6f}")
-                
-                # Log convergence progress
-                self.add_status_message(job_id, f"Job {job_id}: Iteration {mode} - Convergence delta: {delta_norm:.6f}")
-                
-                # Wait for an additional short time to collect any pending Q values from sites
-                # This ensures we get complete Q values from all sites
-                if not all_reported:
-                    self.add_status_message(job_id, "Waiting for additional site data...")
-                    # We'll continue with the current data but log any further updates we receive
-                
-                if delta_norm < 1e-4:
-                    self.add_status_message(job_id, f"Job {job_id}: Convergence achieved after {mode} iterations with delta {delta_norm:.6f}")
-                    break
-            
-            # If we completed all iterations without converging, log that
-            if mode == max_iter:
-                self.add_status_message(job_id, f"Job {job_id}: Maximum iterations ({max_iter}) reached without full convergence. Final delta: {delta_norm:.6f}")
-            
-            # Show convergence history in a summarized format
-            if len(convergence_history) > 1:
-                convergence_text = ", ".join([f"{i+1}:{v:.6f}" for i, v in enumerate(convergence_history)])
-                self.add_status_message(job_id, f"Job {job_id}: Convergence history: {convergence_text}")
-                
-                # Create a simple ASCII chart to visualize convergence
-                if len(convergence_history) > 2:  # Only show chart if we have enough data points
-                    max_val = max(convergence_history)
-                    min_val = min(convergence_history)
-                    range_val = max_val - min_val
-                    
-                    # Normalize values to 0-20 range for ASCII chart
-                    norm_values = [int(20 * (v - min_val) / range_val) if range_val > 0 else 10 for v in convergence_history]
-                    
-                    # Also create a chart for Q values if available
-                    if "q_values" in job_info and len(job_info["q_values"]) > 2:
-                        q_values_chart = ["Q values across iterations:"]
-                        
-                        # Format each Q value
-                        for i, q_val in enumerate(job_info["q_values"]):
-                            q_values_chart.append(f"Iter {i+1:2d}: Q = {q_val:.6f}")
-                        
-                        # Add Q values chart to status messages
-                        for line in q_values_chart:
-                            self.add_status_message(job_id, f"Job {job_id}: {line}")
-                    
-                    # Create ASCII chart - use delta values directly for clarity
-                    chart = ["Convergence delta pattern:"]
-                    for i, val in enumerate(convergence_history):
-                        # Using a fixed width to align the chart
-                        iter_label = f"Iter {i+1:2d}"
-                        line = f"{iter_label}: delta = {val:.6f}"
-                        chart.append(line)
-                    
-                    # Add chart to status messages
-                    for line in chart:
-                        self.add_status_message(job_id, f"Job {job_id}: {line}")
-            
-            # Print a summary of the convergence process
-            if len(q_values) > 0:
-                q_summary = ", ".join([f"Q{i+1}={q:.2f}" for i, q in enumerate(q_values)])
-                self.add_status_message(job_id, f"Q values summary: {q_summary}")
-                
-                # Also print final beta
-                final_beta_str = " ".join([f"{b:.6f}" for b in beta])
-                self.add_status_message(job_id, f"Final beta values = {final_beta_str}")
-            
-            # Note: Job completion notification will be sent after results are saved
-            # (replaced the old mode=0 termination with standardized job_completed message)
-            
-            # Create the aggregated data for imputation
-            aggregated_data = {
-                "beta": beta,
-                "vcov": vcov_mat  # Changed key from 'vcov_mat' to 'vcov' to match what's expected in SIMI algorithm
-            }
-            
-            # Run imputation
-            imputed_dfs = await self.algorithm.impute(central_data, mvar, aggregated_data, method)
+                # Run imputation
+                imputed_dfs = await self.algorithm.impute(central_data, mvar, aggregated_data, method)
+            else:
+                print(f"❌ SIMI: Logistic regression results not found in job_info")
+                print(f"🔍 SIMI: Available keys in job_info: {list(job_info.keys())}")
+                self.add_status_message(job_id, f"ERROR: Logistic regression results not available")
+                return
         
         # Create a timestamp for uniqueness
         import datetime
@@ -664,11 +769,6 @@ class SIMIService(FederatedJobProtocolService):
         print(f"🎉 SIMI: Job {job_id} completed successfully with {len(imputed_dfs)} imputations")
         print(f"📁 SIMI: Results available at: {relative_zip_path}")
         
-        # Check if we already completed the job during mode 2
-        if job_info.get("early_completion", False):
-            print(f"ℹ️ SIMI: Job {job_id} was already completed during mode 2, skipping final completion")
-            return
-            
         # Update job status with a specific message about imputation completion
         self.add_status_message(job_id, f"Job {job_id}: Imputation completed and data saved")
         
@@ -678,10 +778,6 @@ class SIMIService(FederatedJobProtocolService):
             final_iter = len(history)
             final_delta = history[-1] if history else "N/A"
             self.add_status_message(job_id, f"Job {job_id}: Logistic regression summary - {final_iter} iterations, final delta: {final_delta}")
-        
-        # Show the results ready message if it wasn't already shown during mode 2
-        if not job_info.get("results_ready", False):
-            self.add_status_message(job_id, f"✓ Results ready: Click the \"Download Results\" button to download the imputed dataset.")
         
         # Set the result to include the dataset path
         result = {"imputed_dataset_path": relative_zip_path}
