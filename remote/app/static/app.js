@@ -1,3 +1,25 @@
+// Function to update the browser tab title with the current site name
+function updateTabTitleWithSiteName() {
+    const siteElement = document.querySelector('.site-id');
+    let siteName = '';
+    if (siteElement) {
+        const text = siteElement.textContent || '';
+        const parts = text.split(':');
+        if (parts.length > 1) {
+            siteName = parts[1].trim();
+        } else {
+            siteName = text.trim();
+        }
+    }
+    if (siteName) {
+        document.title = `remote site - ${siteName}`;
+    } else {
+        document.title = 'remote site';
+    }
+}
+
+// Make updateTabTitleWithSiteName available globally
+window.updateTabTitleWithSiteName = updateTabTitleWithSiteName;
 // This file contains JavaScript code for the remote site
 
 // Helper function to get current site_index from URL
@@ -19,6 +41,19 @@ function addSiteIndexToUrl(url) {
 document.addEventListener('DOMContentLoaded', function() {
     // Initialize global job running state
     window.jobIsRunning = false;
+
+    // Set browser tab title to include site name
+    // Add a small delay to ensure DOM is fully loaded
+    setTimeout(function() {
+        updateTabTitleWithSiteName();
+        console.log("Updated browser tab title to:", document.title);
+    }, 100);
+    
+    // Set up an additional timer to ensure title is set correctly
+    setTimeout(function() {
+        updateTabTitleWithSiteName();
+        console.log("Re-checked browser tab title:", document.title);
+    }, 500);
     
     // Check if job status container is visible, which indicates a running job
     const jobStatusContainer = document.getElementById('job-status-container');
