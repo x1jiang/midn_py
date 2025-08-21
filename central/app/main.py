@@ -55,9 +55,76 @@ def test_job_check():
         from .services.job_status import JobStatusTracker
         tracker = JobStatusTracker()
         try:
+            # Get the first running job ID
             running_job_id = tracker.get_first_running_job_id()
-            # Convert to explicit int or None to avoid serialization issues
+            
+            # Initialize result with running job ID
             result = {"running_job_id": int(running_job_id) if running_job_id is not None else None}
+            
+            # Add more detailed job status information
+            if running_job_id is not None:
+                job_status = tracker.get_job_status(running_job_id)
+                if job_status:
+                    result["job_details"] = {
+                        "job_id": job_status.job_id,
+                        "status": job_status.status,
+                        "completed": job_status.completed,
+                        "error": job_status.error,
+                        "last_message": job_status.messages[-1] if job_status.messages else "No messages",
+                        "message_count": len(job_status.messages),
+                    }
+                else:
+                    result["job_details"] = {"status": "Job found in tracker but no details available"}
+            
+            # Also show all jobs currently being tracked
+            all_jobs = {}
+            for jid, jstatus in tracker.jobs.items():
+                all_jobs[jid] = {
+                    "status": jstatus.status,
+                    "completed": jstatus.completed,
+                    "last_message": jstatus.messages[-1] if jstatus.messages else "No messages",
+                }
+            
+            result["all_tracked_jobs"] = all_jobs
+            print(f"Checking for running jobs: {result}")
+            
+            # Check if there are any registered instances for algorithms in the factory
+            from .services.algorithm_factory import AlgorithmServiceFactory
+            result["registered_algorithms"] = list(AlgorithmServiceFactory._service_classes.keys())
+            result["active_algorithm_instances"] = list(AlgorithmServiceFactory._service_instances.keys())
+            
+            # For debugging, try to get the SIMICE service and check actual job dictionary
+            try:
+                # Use the global manager instance instead of creating a new one
+                simice_service = AlgorithmServiceFactory.create_service("SIMICE", manager)
+                result["simice_service_check"] = "OK"
+                
+                # DEBUG: Get actual job dictionary information
+                if running_job_id and hasattr(simice_service, 'jobs') and running_job_id in simice_service.jobs:
+                    actual_job = simice_service.jobs[running_job_id]
+                    result["actual_job_dict"] = {
+                        "status": actual_job.get("status"),
+                        "participants": actual_job.get("participants", []),
+                        "connected_sites": actual_job.get("connected_sites", []),
+                        "ready_sites": actual_job.get("ready_sites", []),
+                        "parameters": actual_job.get("parameters", {}),
+                        "creation_time": actual_job.get("creation_time")
+                    }
+                    # Also add detailed comparison for debugging
+                    from common.algorithm.job_protocol import JobStatus
+                    result["debug_info"] = {
+                        "job_status_is_waiting": actual_job.get("status") == JobStatus.WAITING.value,
+                        "waiting_value": JobStatus.WAITING.value,
+                        "actual_status_value": actual_job.get("status"),
+                        "all_sites_ready": set(actual_job.get("ready_sites", [])) == set(actual_job.get("participants", [])),
+                        "ready_sites_set": list(set(actual_job.get("ready_sites", []))),
+                        "participants_set": list(set(actual_job.get("participants", [])))
+                    }
+                else:
+                    result["actual_job_dict"] = "No job found in SIMICE service jobs dictionary"
+                    
+            except Exception as e:
+                result["simice_service_error"] = str(e)
             print(f"Checking for running jobs: {result}")
             return result
         except Exception as e:
@@ -68,6 +135,88 @@ def test_job_check():
         print(f"Critical error in test_job_check: {str(e)}")
         # Ultra fallback
         return {"running_job_id": None, "critical_error": str(e)}
+
+# Debug endpoint to manually trigger start computation
+@app.get("/debug/trigger-start-computation/{job_id}")
+async def debug_trigger_start_computation(job_id: int):
+    """Manually trigger start computation for debugging."""
+    try:
+        print(f"🔧 DEBUG: Manually triggering start computation for job {job_id}")
+        
+        # Get the algorithm service
+        from .services.algorithm_factory import AlgorithmServiceFactory
+        from common.algorithm.job_protocol import JobStatus
+        
+        # Use the global manager instance instead of creating a new one
+        
+        # Check what services are available
+        print(f"📋 Available services: {list(AlgorithmServiceFactory._service_instances.keys())}")
+        
+        # Try to get SIMICE service
+        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
+            return {"error": "SIMICE service not available", "available_services": list(AlgorithmServiceFactory._service_instances.keys())}
+        
+        simice_service = AlgorithmServiceFactory._service_instances["SIMICE"]
+        
+        if job_id not in simice_service.jobs:
+            return {"error": f"Job {job_id} not found", "available_jobs": list(simice_service.jobs.keys())}
+        
+        job = simice_service.jobs[job_id]
+        
+        # Log current state
+        current_state = {
+            "status": job.get("status"),
+            "participants": job.get("participants", []),
+            "connected_sites": job.get("connected_sites", []),
+            "ready_sites": job.get("ready_sites", [])
+        }
+        print(f"🔍 Current job state: {current_state}")
+        
+        # Manually fix the job status and ready sites
+        site_ids = ["224bdbc5", "863a2efd"]
+        
+        # Ensure sites are connected
+        for site_id in site_ids:
+            if site_id not in job.get("connected_sites", []):
+                job.setdefault("connected_sites", []).append(site_id)
+                print(f"✅ Added {site_id} to connected sites")
+        
+        # Set job status to waiting
+        if job["status"] != JobStatus.WAITING.value:
+            print(f"🔧 Fixing job status from '{job['status']}' to '{JobStatus.WAITING.value}'")
+            job["status"] = JobStatus.WAITING.value
+        
+        # Manually trigger site_ready for both sites
+        for site_id in site_ids:
+            site_ready_data = {
+                "type": "site_ready",
+                "job_id": job_id,
+                "site_id": site_id,
+                "status": "ready"
+            }
+            print(f"📤 Triggering site_ready for {site_id}...")
+            await simice_service._handle_site_ready(site_id, site_ready_data)
+        
+        # Return final state
+        final_state = {
+            "status": job.get("status"),
+            "participants": job.get("participants", []),
+            "connected_sites": job.get("connected_sites", []),
+            "ready_sites": job.get("ready_sites", [])
+        }
+        
+        return {
+            "message": "Start computation triggered",
+            "initial_state": current_state,
+            "final_state": final_state
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in debug trigger: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e)}
+
 
 # Debug endpoint to restart SIMICE iteration
 @app.get("/debug/restart-iteration/{job_id}")
@@ -793,6 +942,7 @@ async def websocket_endpoint(websocket: WebSocket, site_id: str, token: str = De
             
     except Exception as e:
         print(f"💥 WebSocket Error for site {site_id}: {e}")
+        print(f"💥 WebSocket Error details: {type(e).__name__}: {str(e)}")
     finally:
         print(f"🔌 WebSocket: Disconnecting site {site_id}")
         manager.disconnect(websocket, site_id)
@@ -802,20 +952,27 @@ async def route_websocket_message(site_id: str, data: str):
     """
     Route WebSocket message to the appropriate algorithm service.
     """
-    print(f"🎯 Router: Processing message from site {site_id}")
+    # Focused logging for stats messages
+    if "stats" in data:
+        print(f"📊 Router: STATS from {site_id}")
+    # else:
+    #     print(f"🎯 Router: Processing message from site {site_id}")  # Reduced noise
     
     try:
         # Parse message to determine which algorithm/job it belongs to
         import json
         from common.algorithm.job_protocol import parse_message
         
-        print(f"📝 Router: Parsing message from site {site_id}")
+        # print(f"📝 Router: Parsing message from site {site_id}")  # Reduced noise
         # parse_message returns a dictionary, not a tuple
         message_data = parse_message(data)
         message_type = message_data.get('type')
         job_id = message_data.get('job_id')
         
-        print(f"🔍 Router: Parsed message - type: {message_type}, job_id: {job_id}")
+        if message_type == "stats":
+            print(f"🔍 Router: STATS message - job_id: {job_id}")
+        # else:
+        #     print(f"🔍 Router: Parsed message - type: {message_type}, job_id: {job_id}")  # Reduced noise
         
         if job_id:
             # Look up the job to determine which algorithm service to use

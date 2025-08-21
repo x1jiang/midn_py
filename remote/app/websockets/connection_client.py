@@ -265,8 +265,11 @@ class ConnectionClient:
             True if the message was sent successfully, False otherwise
         """
         try:
-            # Convert message dict to JSON string
-            message_str = json.dumps(message_dict)
+            # Import NumpyJSONEncoder from job_protocol if not already imported
+            from common.algorithm.job_protocol import NumpyJSONEncoder
+            
+            # Convert message dict to JSON string using NumpyJSONEncoder for proper NumPy serialization
+            message_str = json.dumps(message_dict, cls=NumpyJSONEncoder)
             
             # Send message with timeout
             await asyncio.wait_for(websocket.send(message_str), timeout=self.message_timeout)
@@ -277,6 +280,8 @@ class ConnectionClient:
             
         except Exception as e:
             await self.send_status(f"Error sending message: {str(e)}")
+            import traceback
+            print(f"Error details: {traceback.format_exc()}")
             return False
     
     async def receive_message(self, websocket: websockets.WebSocketClientProtocol, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:

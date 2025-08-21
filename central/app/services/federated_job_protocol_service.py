@@ -279,10 +279,20 @@ class FederatedJobProtocolService(BaseAlgorithmService):
         if site_id not in job["ready_sites"]:
             job["ready_sites"].append(site_id)
             self.add_status_message(job_id, f"Site {site_id} ready for computation ({len(job['ready_sites'])}/{len(job['participants'])} ready)")
+            print(f"✅ Protocol: Site {site_id} ready for computation ({len(job['ready_sites'])}/{len(job['participants'])} ready)")
+        
+        # CRITICAL FIX: If job status is not "waiting" but should be, reset it
+        if job["status"] != JobStatus.WAITING.value and job["status"] != JobStatus.ACTIVE.value:
+            print(f"🔧 Protocol: Job status was '{job['status']}', resetting to WAITING")
+            job["status"] = JobStatus.WAITING.value
+        
+        # Check if all sites are ready (comparing sets to ensure exact match regardless of order)
+        all_sites_ready = len(job["ready_sites"]) == len(job["participants"]) and set(job["ready_sites"]).issubset(set(job["connected_sites"]))
         
         # If job is still in waiting status and all sites are ready, 
         # send start computation message to all sites
-        if job["status"] == JobStatus.WAITING.value and set(job["ready_sites"]) == set(job["participants"]):
+        if job["status"] == JobStatus.WAITING.value and all_sites_ready:
+            print(f"🚀 Protocol: All sites ready ({len(job['ready_sites'])}/{len(job['participants'])}), starting computation for job {job_id}")
             self.add_status_message(job_id, f"All sites ready, starting computation")
             job["status"] = JobStatus.ACTIVE.value
             
@@ -294,6 +304,7 @@ class FederatedJobProtocolService(BaseAlgorithmService):
             
             for site in job["connected_sites"]:
                 await self.manager.send_to_site(start_message, site)
+                print(f"📤 Protocol: Sent START_COMPUTATION to site {site}")
             
             # Let subclasses handle algorithm-specific start logic
             await self._handle_algorithm_start(job_id)

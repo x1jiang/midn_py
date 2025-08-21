@@ -42,7 +42,7 @@ class ProtocolMessageType(Enum):
     HEARTBEAT_ACK = "heartbeat_ack"
     # Include message types from protocol.py
     METHOD = "method"
-    DATA = "data"
+    DATA = "data"  # Used for all computation-related messages, with instructions wrapped inside
     MODE = "mode"
     STATUS = "status"
     COMPLETE = "complete"
@@ -114,6 +114,28 @@ def parse_message(message_str: str) -> Dict[str, Any]:
 
 class Protocol:
     """Common protocol utilities for both central and remote implementations"""
+    
+    @staticmethod
+    def create_data_message(job_id: int, instruction: str, **payload) -> Dict[str, Any]:
+        """
+        Create a standard DATA message with embedded instruction for computation.
+        All algorithm-specific computation instructions should use this message type.
+        
+        Args:
+            job_id: ID of the job
+            instruction: Instruction type (e.g., "get_statistics", "update_imputations")
+            **payload: Additional payload data
+            
+        Returns:
+            Message dictionary
+        """
+        message = {
+            "type": ProtocolMessageType.DATA.value,
+            "job_id": job_id,
+            "instruction": instruction
+        }
+        message.update(payload)
+        return message
     
     @staticmethod
     def create_connect_message(job_id: int, site_id: str) -> Dict[str, Any]:

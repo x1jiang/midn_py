@@ -95,7 +95,7 @@ class FederatedJobProtocolClient(BaseAlgorithmClient):
                     continue
                 
                 # Wait for connection confirmation
-                confirmation = await client.receive_message(websocket)
+                confirmation = await client.receive_message(websocket, timeout=None)  # Wait indefinitely
                 if not confirmation or confirmation.get("type") != ProtocolMessageType.CONNECTION_CONFIRMED.value:
                     if confirmation and confirmation.get("type") == ProtocolMessageType.ERROR.value:
                         error_code = confirmation.get("code", "UNKNOWN")
@@ -126,7 +126,7 @@ class FederatedJobProtocolClient(BaseAlgorithmClient):
                 # Wait for start_computation message
                 start_received = False
                 while not start_received and not self._is_job_fully_completed():
-                    message = await client.receive_message(websocket)
+                    message = await client.receive_message(websocket, timeout=None)  # Wait indefinitely
                     if not message:
                         await client.send_status("Connection lost while waiting for start signal")
                         break
@@ -309,7 +309,7 @@ class FederatedJobProtocolClient(BaseAlgorithmClient):
         try:
             # Process messages until job completion
             while True:
-                message = await client.receive_message(websocket)
+                message = await client.receive_message(websocket, timeout=None)  # Wait indefinitely
                 if not message:
                     await client.send_status("Connection lost during computation")
                     break

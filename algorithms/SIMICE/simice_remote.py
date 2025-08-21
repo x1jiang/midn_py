@@ -29,6 +29,7 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
         self.missing_masks = {}
         self.current_data = None
         self.original_data = None
+        self.missing_variables = []  # Track which columns need imputation
     
     @classmethod
     def get_algorithm_name(cls) -> str:
@@ -132,23 +133,56 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
             "status": "initialized"
         }
     
+    async def initialize_imputation(self, missing_variables: List[int]) -> None:
+        """
+        Initialize the imputation process with the list of missing variables.
+        This method is called by the client protocol to set up which columns
+        need imputation.
+        
+        Args:
+            missing_variables: List of 1-based column indices that need imputation
+        """
+        print(f"🔧 SIMICERemoteAlgorithm: initialize_imputation called with missing_variables: {missing_variables}")
+        
+        # Store the missing variables (these are 1-based indices from the server)
+        self.missing_variables = missing_variables.copy() if missing_variables else []
+        
+        print(f"✅ SIMICERemoteAlgorithm: Successfully initialized with missing_variables: {self.missing_variables}")
+    
     async def compute_local_statistics(self, target_col_idx: int, method: str) -> Dict[str, Any]:
         """
         Compute local statistics for a specific target column.
         Following R reference: X = matrix(DD[!miss[,yidx],-yidx],ncol=p-1)
         
         Args:
-            target_col_idx: 0-based index of the target column
+            target_col_idx: 1-based index of the target column (matching server protocol)
             method: "gaussian" or "logistic"
             
         Returns:
             Local statistics for this target column
         """
-        if target_col_idx not in self.missing_masks:
+        print(f"📊 SIMICERemoteAlgorithm: Computing statistics for column {target_col_idx} using {method}")
+        print(f"🔍 SIMICERemoteAlgorithm DEBUG: missing_variables = {getattr(self, 'missing_variables', 'NOT SET')}")
+        
+        # Check if initialize_imputation was called
+        if not hasattr(self, 'missing_variables') or not self.missing_variables:
+            print(f"❌ SIMICERemoteAlgorithm: Missing variables not initialized")
+            return {"error": f"Missing variables not initialized - call initialize_imputation first"}
+            
+        # Check if this column is in the missing variables list
+        if target_col_idx not in self.missing_variables:
+            print(f"❌ SIMICERemoteAlgorithm: Column {target_col_idx} not in missing_variables {self.missing_variables}")
+            return {"error": f"Target column {target_col_idx} not initialized"}
+        
+        # Convert to 0-based for internal processing
+        target_col_0based = target_col_idx - 1
+        
+        if target_col_0based not in self.missing_masks:
+            print(f"❌ SIMICERemoteAlgorithm: Column {target_col_0based} not in missing_masks")
             return {"error": f"Target column {target_col_idx} not initialized"}
         
         # Get observations where this target column is not missing (like R: !miss[,yidx])
-        missing_mask = self.missing_masks[target_col_idx]
+        missing_mask = self.missing_masks[target_col_0based]
         non_missing_mask = ~missing_mask
         
         if not non_missing_mask.any():
@@ -171,11 +205,11 @@ class SIMICERemoteAlgorithm(RemoteAlgorithm):
         
         # Prepare predictors: all columns except current target (like R: -yidx)
         all_cols = list(range(self.current_data.shape[1]))
-        predictor_cols = [i for i in all_cols if i != target_col_idx]
+        predictor_cols = [i for i in all_cols if i != target_col_0based]
         
         # Get non-missing observations for this target column
         X = self.current_data[non_missing_mask][:, predictor_cols]
-        y = self.current_data[non_missing_mask, target_col_idx]
+        y = self.current_data[non_missing_mask, target_col_0based]
         
         print(f"🔢 SIMICE Statistics: Column {target_col_idx}, X shape: {X.shape}, y shape: {y.shape}")
         print(f"   Non-missing observations: {np.sum(non_missing_mask)}/{len(missing_mask)}")
