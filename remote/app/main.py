@@ -37,19 +37,21 @@ def _token_expiry_str(token: str | None) -> str | None:
         return None
     return None
 
-async def get_site_info(site_id):
-    """Try to get the site information from the central server"""
+
+async def get_site_info(site_id, active_site=None):
+    """Try to get the site information from the central server, using the active site's token."""
     try:
-        if site_id and site_id != "my_site_id":
+        if site_id and site_id != "my_site_id" and active_site and active_site.TOKEN:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{config.settings.HTTP_URL}/api/remote/info",
-                                    params={"site_id": site_id},
-                                    headers={"Authorization": f"Bearer {config.settings.TOKEN}"})
+                r = await client.get(
+                    f"{active_site.HTTP_URL}/api/remote/info",
+                    params={"site_id": site_id},
+                    headers={"Authorization": f"Bearer {active_site.TOKEN}"}
+                )
                 if r.status_code == 200:
                     return r.json()
     except Exception as e:
         print(f"Error fetching site info: {e}")
-    
     return None
 
 @app.get("/", response_class=HTMLResponse)
@@ -81,7 +83,7 @@ async def read_root(request: Request, refresh: bool = False, site_index: int = 0
                         message = f"Data refreshed successfully. Found {len(jobs)} jobs assigned to this site."
                     
                     # Only try to get site information if jobs API call succeeds (token is valid)
-                    site_info = await get_site_info(active_site.SITE_ID)
+                    site_info = await get_site_info(active_site.SITE_ID, active_site.TOEKN)
                 else:
                     print(f"Failed to fetch jobs: HTTP {r.status_code}")
                     if refresh:
@@ -246,7 +248,7 @@ async def list_jobs(request: Request, refresh: bool = False, site_index: int = 0
                         message = f"Data refreshed successfully. Found {len(jobs)} assigned jobs."
                     
                     # Only try to get site information if jobs API call succeeds (token is valid)
-                    site_info = await get_site_info(active_site.SITE_ID)
+                    site_info = await get_site_info(active_site.SITE_ID, active_site.TOKEN)
                 elif refresh:
                     message = f"Failed to refresh data. Server returned status code {r.status_code}."
         except Exception as e:

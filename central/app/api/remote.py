@@ -12,6 +12,7 @@ router = APIRouter()
 async def get_site_info(site_id: str, user: str = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get information about a remote site"""
     # user is the JWT subject; must match site_id
+    print(f"get_site_info called with site_id={site_id}, user={user}")
     if user != site_id:
         raise HTTPException(status_code=403, detail="Forbidden")
         
@@ -32,6 +33,7 @@ async def get_site_info(site_id: str, user: str = Depends(get_current_user), db:
 @router.get("/jobs", response_model=list[dict])
 async def list_site_jobs(site_id: str, user: str = Depends(get_current_user), db: Session = Depends(get_db)):
     # user is the JWT subject; must match site_id
+    print(f"list_site_jobs called with site_id={site_id}, user={user}")
     if user != site_id:
         raise HTTPException(status_code=403, detail="Forbidden")
     jobs = db.query(models.Job).all()
