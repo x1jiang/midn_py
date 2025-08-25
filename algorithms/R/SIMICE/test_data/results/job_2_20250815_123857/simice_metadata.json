@@ -1,0 +1,17 @@
+{
+  "job_id": 2,
+  "algorithm": "SIMICE",
+  "imputation_count": 12,
+  "target_columns": [
+    1,
+    7
+  ],
+  "is_binary": [
+    true,
+    false
+  ],
+  "completed_iterations": 73,
+  "total_sites": 2,
+  "timestamp": "20250815_123857",
+  "note": "SIMICE results"
+}
