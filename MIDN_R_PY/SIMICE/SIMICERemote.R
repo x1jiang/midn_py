@@ -1,0 +1,117 @@
+# Function SIMICERemote
+# Arguments:
+# D: Data matrix
+# port: local listening port
+# cent_host: hostname of central site
+# cent_port: port of central site
+
+
+source("Core/Transfer.R")
+
+
+SIMICERemote = function(D,port,cent_host,cent_port)
+{
+  D = cbind(D,1)
+  p = ncol(D)
+  
+  while (TRUE)
+  {
+    rcon <- socketConnection(host="localhost",port=port,blocking=TRUE,server=TRUE,open="w+b",timeout=60*10)
+    Sys.sleep(0.1)
+    wcon <- socketConnection(cent_host,cent_port,open="w+b")
+
+    while ( TRUE )
+    {
+      inst = readBin(rcon,character())
+      if ( inst == "Initialize" )
+      {
+        mvar = readVec(rcon)
+        miss = is.na(D)
+        idx = rowSums(miss[,-mvar]) == 0
+        n = length(idx)
+        DD = D[idx,]
+        miss = is.na(DD)
+        for ( j in mvar )
+        {
+          idx1 = which(miss[,j])
+          idx0 = which(!miss[,j])
+          DD[idx1,j] = mean(D[idx0,j])
+        }
+      }
+      else if ( inst == "Information" )
+      {
+        method = readBin(rcon,character())
+        yidx = readBin(rcon,integer())
+        X = matrix(DD[!miss[,yidx],-yidx],ncol=p-1)
+        y = DD[!miss[,yidx],yidx]
+        if ( method == "Gaussian" )
+          SIRemoteLS(X,y,wcon)
+        else if ( method == "logistic" )
+          SIRemoteLogit(X,y,rcon,wcon)
+      }
+      else if ( inst == "Impute" )
+      {
+        method = readBin(rcon,character())
+        yidx = readBin(rcon,integer())
+        midx = which(miss[,yidx])
+        nmidx = length(midx)
+        X = matrix(DD[midx,-yidx],ncol=p-1)
+        if ( method == "Gaussian" )
+        {
+          beta = readBin(rcon,numeric(),p-1)
+          sig = readBin(rcon,numeric())
+          DD[midx,yidx] = X %*% beta + rnorm(nmidx,0,sig)
+        }
+        else if ( method == "logistic" )
+        {
+          alpha = readBin(rcon,numeric(),p-1)
+          pr = 1 / (1 + exp(-X %*% alpha))
+          DD[midx,yidx] = rbinom(nmidx,1,pr)
+        }
+      }
+      else if ( inst == "End" )
+        break
+    }
+    
+    
+    close(rcon)
+    close(wcon)
+  }
+}
+
+
+SIRemoteLS = function(X,y,wcon)
+{
+  p = ncol(X)
+  n = nrow(X)
+  XX = t(X)%*%X
+  Xy = drop(t(X)%*%y)
+  yy = sum(y^2)
+  
+  writeVec(n,wcon)
+  writeMat(XX,wcon)
+  writeVec(Xy,wcon)
+  writeVec(yy,wcon)
+}
+
+
+SIRemoteLogit = function(X,y,rcon,wcon)
+{
+  p = ncol(X)
+  n = nrow(X)
+  
+  writeVec(n,wcon)
+  mode = readBin(rcon,integer())
+  beta = readVec(rcon)
+  xb = drop(X%*%beta)
+  pr = 1/(1+exp(-xb))
+  Q = sum(y*xb) + sum(log(1-pr[pr<0.5])) + sum(log(pr[pr>=0.5])-xb[pr>=0.5])
+  if ( mode == 1 )
+  {
+    H = t(X)%*%(X*pr*(1-pr))
+    writeMat(H,wcon)
+    g = t(X)%*%(y-pr)
+    writeVec(g,wcon)
+  }
+  writeVec(Q,wcon)
+}

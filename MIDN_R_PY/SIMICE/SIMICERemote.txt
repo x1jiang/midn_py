@@ -1,0 +1,243 @@
+# Function SIMICERemote
+# Arguments:
+# D: Data matrix
+# port: local listening port
+# cent_host: hostname of central site
+# cent_port: port of central site
+
+
+source("Core/Transfer.R")
+
+# Set to TRUE to enable detailed debug information, similar to Python version
+print_debug_info = TRUE
+
+SIMICERemote = function(D,port,cent_host,cent_port)
+{
+  D = cbind(D,1)
+  p = ncol(D)
+  
+  # Create debug counters similar to Python implementation
+  debug_counters <- list(
+    ls_calls = 0,
+    logit_calls = 0,
+    impute_calls = 0
+  )
+  
+  # Use port number as site ID for logging
+  site_id <- paste0("remote", port)
+  
+  if (print_debug_info) {
+    cat(sprintf("[%s] Debug mode ENABLED - detailed logging will be shown\n", site_id))
+    cat(sprintf("[%s] Data shape: %d x %d\n", site_id, nrow(D), ncol(D)))
+    has_nan <- any(is.na(D))
+    cat(sprintf("[%s] Data contains NA values: %s\n", site_id, has_nan))
+    if (has_nan) {
+      nan_cols <- which(colSums(is.na(D)) > 0)
+      cat(sprintf("[%s] Columns with NA: %s\n", site_id, 
+                 paste(nan_cols, collapse=", ")))
+    }
+  }
+  
+  while (TRUE)
+  {
+    if (print_debug_info) {
+      cat(sprintf("[%s] Waiting for connection on port %d\n", site_id, port))
+    }
+    rcon <- socketConnection(host="localhost",port=port,blocking=TRUE,server=TRUE,open="w+b",timeout=60*10)
+    Sys.sleep(0.1)
+    if (print_debug_info) {
+      cat(sprintf("[%s] Connecting to central at %s:%d\n", site_id, cent_host, cent_port))
+    }
+    wcon <- socketConnection(cent_host,cent_port,open="w+b")
+
+    while ( TRUE )
+    {
+      inst = readBin(rcon,character())
+      if (print_debug_info) {
+        cat(sprintf("[%s] Received instruction: %s\n", site_id, inst))
+      }
+      
+      if ( inst == "Initialize" )
+      {
+        mvar = readVec(rcon)
+        if (print_debug_info) {
+          cat(sprintf("[%s] Initializing with missing variables: %s\n", site_id, paste(mvar, collapse=", ")))
+        }
+        miss = is.na(D)
+        idx = rowSums(miss[,-mvar]) == 0
+        n = length(idx)
+        DD = D[idx,]
+        miss = is.na(DD)
+        for ( j in mvar )
+        {
+          idx1 = which(miss[,j])
+          idx0 = which(!miss[,j])
+          DD[idx1,j] = mean(D[idx0,j])
+          if (print_debug_info) {
+            cat(sprintf("[%s] Initialized missing values for variable %d with mean: %.4f\n", site_id, j, mean(D[idx0,j])))
+          }
+        }
+      }
+      else if ( inst == "Information" )
+      {
+        method = readBin(rcon,character())
+        yidx = readBin(rcon,integer())
+        if (print_debug_info) {
+          cat(sprintf("[%s] Processing Information request: method=%s, variable=%d\n", site_id, method, yidx))
+        }
+        X = matrix(DD[!miss[,yidx],-yidx],ncol=p-1)
+        y = DD[!miss[,yidx],yidx]
+        if ( method == "Gaussian" ) {
+          debug_counters$ls_calls = debug_counters$ls_calls + 1
+          if (print_debug_info) {
+            cat(sprintf("[%s][LS #%d] Processing linear regression with n=%d, p=%d\n", 
+                        site_id, debug_counters$ls_calls, nrow(X), ncol(X)))
+          }
+          SIRemoteLS(X, y, wcon)
+          if (print_debug_info) {
+            cat(sprintf("[%s][LS #%d] Data sent to central\n", site_id, debug_counters$ls_calls))
+          }
+        }
+        else if ( method == "logistic" ) {
+          debug_counters$logit_calls = debug_counters$logit_calls + 1
+          if (print_debug_info) {
+            cat(sprintf("[%s][LOGIT #%d] Processing logistic regression with n=%d, p=%d\n", 
+                        site_id, debug_counters$logit_calls, nrow(X), ncol(X)))
+          }
+          SIRemoteLogit(X, y, rcon, wcon)
+          if (print_debug_info) {
+            cat(sprintf("[%s][LOGIT #%d] Data sent to central\n", site_id, debug_counters$logit_calls))
+          }
+        }
+      }
+      else if ( inst == "Impute" )
+      {
+        debug_counters$impute_calls = debug_counters$impute_calls + 1
+        iter_num = debug_counters$impute_calls
+        
+        method = readBin(rcon,character())
+        yidx = readBin(rcon,integer())
+        midx = which(miss[,yidx])
+        nmidx = length(midx)
+        X = matrix(DD[midx,-yidx],ncol=p-1)
+        
+        if (print_debug_info) {
+          cat(sprintf("[%s][IMPUTE #%d] Imputing variable %d, method=%s, missing count=%d\n", 
+                      site_id, iter_num, yidx, method, nmidx))
+        }
+        
+        if ( method == "Gaussian" )
+        {
+          beta = readBin(rcon,numeric(),p-1)
+          sig = readBin(rcon,numeric())
+          
+          if (print_debug_info) {
+            cat(sprintf("[%s][IMPUTE #%d] Gaussian imputation: beta range=[%.4f, %.4f], sigma=%.4f\n", 
+                        site_id, iter_num, min(beta), max(beta), sig))
+          }
+          
+          DD[midx,yidx] = X %*% beta + rnorm(nmidx,0,sig)
+          
+          if (print_debug_info) {
+            cat(sprintf("[%s][IMPUTE #%d] Imputed values: mean=%.4f, min=%.4f, max=%.4f\n", 
+                        site_id, iter_num, mean(DD[midx,yidx]), min(DD[midx,yidx]), max(DD[midx,yidx])))
+          }
+        }
+        else if ( method == "logistic" )
+        {
+          alpha = readBin(rcon,numeric(),p-1)
+          
+          if (print_debug_info) {
+            cat(sprintf("[%s][IMPUTE #%d] Logistic imputation: alpha range=[%.4f, %.4f]\n", 
+                        site_id, iter_num, min(alpha), max(alpha)))
+          }
+          
+          pr = 1 / (1 + exp(-X %*% alpha))
+          DD[midx,yidx] = rbinom(nmidx,1,pr)
+          
+          if (print_debug_info) {
+            counts = table(DD[midx,yidx])
+            cat(sprintf("[%s][IMPUTE #%d] Imputed values: 0=%d, 1=%d\n", 
+                        site_id, iter_num, counts["0"], counts["1"]))
+          }
+        }
+      }
+      else if ( inst == "End" ) {
+        if (print_debug_info) {
+          cat(sprintf("[%s] Received End instruction, closing connections\n", site_id))
+          cat(sprintf("[%s] Debug counters: ls_calls=%d, logit_calls=%d, impute_calls=%d\n", 
+                      site_id, debug_counters$ls_calls, debug_counters$logit_calls, debug_counters$impute_calls))
+        }
+        break
+      }
+      else if ( inst == "ping" ) {
+        if (print_debug_info) {
+          cat(sprintf("[%s] Received ping, sending pong\n", site_id))
+        }
+        writeBin("pong", wcon)
+      }
+      else {
+        if (print_debug_info) {
+          cat(sprintf("[%s] Unknown instruction: %s\n", site_id, inst))
+        }
+      }
+    }
+    
+    
+    close(rcon)
+    close(wcon)
+  }
+}
+
+
+SIRemoteLS = function(X,y,wcon)
+{
+  p = ncol(X)
+  n = nrow(X)
+  XX = t(X)%*%X
+  Xy = drop(t(X)%*%y)
+  yy = sum(y^2)
+  
+  if (print_debug_info) {
+    cat(sprintf("LS stats: n=%d, XX shape=%dx%d, X mean=%.4f, y mean=%.4f\n", 
+                n, nrow(XX), ncol(XX), mean(X), mean(y)))
+  }
+  
+  writeVec(n,wcon)
+  writeMat(XX,wcon)
+  writeVec(Xy,wcon)
+  writeVec(yy,wcon)
+}
+
+
+SIRemoteLogit = function(X,y,rcon,wcon)
+{
+  p = ncol(X)
+  n = nrow(X)
+  
+  writeVec(n,wcon)
+  mode = readBin(rcon,integer())
+  beta = readVec(rcon)
+  xb = drop(X%*%beta)
+  pr = 1/(1+exp(-xb))
+  
+  if (print_debug_info) {
+    cat(sprintf("LOGIT stats: n=%d, p=%d, beta range=[%.4f, %.4f], beta mean=%.4f\n", 
+                n, p, min(beta), max(beta), mean(beta)))
+  }
+  
+  Q = sum(y*xb) + sum(log(1-pr[pr<0.5])) + sum(log(pr[pr>=0.5])-xb[pr>=0.5])
+  if ( mode == 1 )
+  {
+    H = t(X)%*%(X*pr*(1-pr))
+    writeMat(H,wcon)
+    g = t(X)%*%(y-pr)
+    writeVec(g,wcon)
+    
+    if (print_debug_info) {
+      cat(sprintf("LOGIT Hessian shape=%dx%d, gradient shape=%d, log-likelihood=%.4f\n", 
+                  nrow(H), ncol(H), length(g), Q))
+    }
+  }
+  writeVec(Q,wcon)
+}
