@@ -33,12 +33,10 @@ echo "Created SIMICE config file at $CONFIG_FILE"
 
 # Define ports - consistent configuration across all components
 CENTRAL_PORT=8000
-REMOTE1_PORT=8001
-REMOTE2_PORT=8002
 CENTRAL_HOST="localhost"
 
 # Kill any process using ports 8000 to 8002
-for port in 8000 8001 8002; do
+for port in 8000; do
     pid=$(lsof -ti tcp:$port)
     if [ -n "$pid" ]; then
         echo "Killing process on port $port (PID $pid)"
@@ -56,15 +54,14 @@ echo "NOTE: You can manually kill the Python process from another terminal if ne
 
 # Run the Python process in foreground
 python run_imputation.py \
-  --algorithm SIMICE \
-  --config_file "$CONFIG_FILE" \
-  --central_data "$CENTRAL_DATA" \
-  --remote_data "$REMOTE1_DATA" "$REMOTE2_DATA" \
-  --output "$RESULT_DIR" \
-  --output_dir "$RESULT_DIR" \
-  --central_host $CENTRAL_HOST \
-  --central_port $CENTRAL_PORT \
-  --remote_ports $REMOTE1_PORT $REMOTE2_PORT
+	--algorithm SIMICE \
+	--config_file "$CONFIG_FILE" \
+	--central_data "$CENTRAL_DATA" \
+	--remote_data "$REMOTE1_DATA" "$REMOTE2_DATA" \
+	--output "$RESULT_DIR" \
+	--output_dir "$RESULT_DIR" \
+	--central_host $CENTRAL_HOST \
+	--central_port $CENTRAL_PORT
 
 # Print completion message regardless of whether Python was killed or finished naturally
 echo "Python execution completed or was manually killed. Continuing with evaluation..."
@@ -433,7 +430,7 @@ Rscript -e 'source("Core/LS.R"); source("Core/Logit.R");
 echo "One-round imputation complete."
 
 # Clean up processes
-for port in 8000 8001 8002; do
+for port in 8000; do
     pid=$(lsof -ti tcp:$port)
     if [ -n "$pid" ]; then
         echo "Killing process on port $port (PID $pid)"

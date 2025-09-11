@@ -7,14 +7,15 @@ import pandas as pd
 import httpx
 from datetime import datetime, timezone
 from jose import jwt
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
+from pathlib import Path
+import os
+import multiprocessing
+import sys
 
 from . import config
-from .services.algorithm_factory import AlgorithmClientFactory
 from .custom_templates import templates
-from . import services  # Ensure algorithm clients are registered
-from .services import init_clients  # Initialize algorithm clients
-import algorithms  # Ensure algorithm implementations are registered
 from .job_status import JobStatusCallback
 from .routes import jobs as jobs_routes
 
@@ -24,6 +25,20 @@ app.mount("/static", StaticFiles(directory="remote/app/static"), name="static")
 
 # Include job status routes
 app.include_router(jobs_routes.router)
+
+# ---- Child-process launchers to avoid nested event loop issues ----
+def _launch_simi_remote(data_path: str, central_host: str, central_port: int, site_id: str, remote_port: int, cfg: Dict[str, Any]):
+    # Ensure MIDN_R_PY is on sys.path in the child process
+    sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
+    import importlib
+    mod = importlib.import_module("SIMI.SIMIRemote")
+    mod.run_remote_client(data_path, central_host, central_port, site_id, remote_port, cfg)
+
+def _launch_simice_remote(data_path: str, central_host: str, central_port: int, site_id: str, remote_port: int, cfg: Dict[str, Any]):
+    sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
+    import importlib
+    mod = importlib.import_module("SIMICE.SIMICERemote")
+    mod.run_remote_client(data_path, central_host, central_port, site_id, remote_port, cfg)
 
 def _token_expiry_str(token: str | None) -> str | None:
     if not token:
@@ -81,9 +96,8 @@ async def read_root(request: Request, refresh: bool = False, site_index: int = 0
                     print(f"Successfully fetched {len(jobs)} jobs for site {active_site.SITE_ID}")
                     if refresh:
                         message = f"Data refreshed successfully. Found {len(jobs)} jobs assigned to this site."
-                    
                     # Only try to get site information if jobs API call succeeds (token is valid)
-                    site_info = await get_site_info(active_site.SITE_ID, active_site.TOEKN)
+                    site_info = await get_site_info(active_site.SITE_ID, active_site)
                 else:
                     print(f"Failed to fetch jobs: HTTP {r.status_code}")
                     if refresh:
@@ -480,62 +494,67 @@ async def start_job(
     
     # Create task based on job type
     try:
-        if job_type == "SIMICE" or (job_details and job_details.get("algorithm") == "SIMICE"):
-            # For SIMICE algorithm
-            extra_params = {}
-            if iteration_before_first_imputation is not None:
-                extra_params["iteration_before_first_imputation"] = int(iteration_before_first_imputation)
-            if iteration_between_imputations is not None:
-                extra_params["iteration_between_imputations"] = int(iteration_between_imputations)
-            
-            # Debug info about current site configuration
-            print(f"Starting SIMICE job with site ID: {active_site.SITE_ID}, site name: {active_site.name}")
-            print(f"Extra params: {extra_params}")
-            
-            # Get target columns and binary flags from job parameters
-            target_column_indexes = job_details["parameters"]["target_column_indexes"] if job_details else [mvar]
-            is_binary_list = job_details["parameters"]["is_binary"] if job_details else [False]
-            
-            print(f"SIMICE target columns: {target_column_indexes}")
-            print(f"SIMICE binary flags: {is_binary_list}")
-            
-            # Create a status callback with site ID
-            status_callback = JobStatusCallback(request.app, job_id, active_site.SITE_ID)
-            
-            # Start SIMICE job with correct client
-            client = AlgorithmClientFactory.create_client("SIMICE")
-            asyncio.create_task(client.run_algorithm(
-                data=df.values,
-                target_column=target_column_indexes[0] - 1,  # Convert first column to 0-based for compatibility
-                job_id=job_id,
-                site_id=active_site.SITE_ID,
-                central_url=active_site.CENTRAL_URL,
-                token=active_site.TOKEN,
-                extra_params=extra_params,
-                status_callback=status_callback,
-                target_column_indexes=target_column_indexes,  # Pass as kwarg
-                is_binary=is_binary_list  # Pass as kwarg
-            ))
+        # Prepare sys.path to import MIDN_R_PY implementations
+        sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
+
+        # Parse CENTRAL_URL for host/port
+        ws = urlparse(active_site.CENTRAL_URL)
+        central_host = ws.hostname or "localhost"
+        central_port = ws.port or (443 if ws.scheme == "wss" else 80)
+        
+        # Persist CSV to a temp file so child processes can read it
+        jobs_dir = Path("remote_runtime/jobs")
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        data_path = jobs_dir / f"job_{job_id}_{active_site.SITE_ID}.csv"
+        df.to_csv(data_path, index=False)
+        print(f"Saved job data to {data_path}")
+
+        # Choose a non-conflicting port for the child remote client server
+        # Avoid the main app ports (8001/8002). Use 18000-series based on site suffix.
+        remote_port: int
+        sid = active_site.SITE_ID or "remote"
+        if sid and sid[-1].isdigit():
+            remote_port = 18000 + int(sid[-1])
         else:
-            # Default to SIMI algorithm
-            print(f"Starting SIMI job (is_binary={is_binary})")
-            print(f"Using site ID: {active_site.SITE_ID}, site name: {active_site.name}")
-            
-            # Create a status callback with site ID
-            status_callback = JobStatusCallback(request.app, job_id, active_site.SITE_ID)
-            
-            # Start SIMI job with status updates
-            client = AlgorithmClientFactory.create_client("SIMI")
-            asyncio.create_task(client.run_algorithm(
-                data=df.values,
-                target_column=mvar_index,
-                job_id=job_id,
-                site_id=active_site.SITE_ID,
-                central_url=active_site.CENTRAL_URL,
-                token=active_site.TOKEN,
-                is_binary=is_binary,  # Pass the binary flag
-                status_callback=status_callback
-            ))
+            remote_port = 18100
+
+        # Build config for algorithms similar to run_imputation.py
+        algo = (job_details.get("algorithm") if job_details else job_type or "SIMI").upper()
+        if algo == "SIMICE":
+            # Pull from job params or form
+            target_column_indexes: List[int] = (job_details.get("parameters", {}).get("target_column_indexes") if job_details else [mvar]) or [mvar]
+            is_binary_list: List[bool] = (job_details.get("parameters", {}).get("is_binary") if job_details else [False]) or [False]
+            iter0 = iteration_before_first_imputation if iteration_before_first_imputation is not None else job_details.get("parameters", {}).get("iteration_before_first_imputation") if job_details else None
+            iterv = iteration_between_imputations if iteration_between_imputations is not None else job_details.get("parameters", {}).get("iteration_between_imputations") if job_details else None
+            algo_config: Dict[str, Any] = {
+                "type_list": ["binary" if b else "gaussian" for b in is_binary_list],
+                "iter0_val": int(iter0) if iter0 is not None else 5,
+                "iter_val": int(iterv) if iterv is not None else 5,
+                "target_column_indexes": target_column_indexes,
+                "is_binary": is_binary_list,
+                "job_id": job_id,
+                "site_id": active_site.SITE_ID,
+            }
+            print(f"Starting SIMICE remote client process host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
+            # Spawn separate process to avoid nested event loop issues
+            proc = multiprocessing.Process(target=_launch_simice_remote, args=(str(data_path), central_host, central_port, active_site.SITE_ID, remote_port, algo_config))
+            proc.start()
+            child_pid = proc.pid
+        else:
+            # SIMI
+            method = "logistic" if is_binary else "gaussian"
+            # HIGHLIGHT: SIMIRemote expects 1-based mvar in its config (it converts to 0-based internally)
+            algo_config: Dict[str, Any] = {
+                "M": 1,
+                "mvar": mvar_index + 1,
+                "method": method,
+                "job_id": job_id,
+                "site_id": active_site.SITE_ID,
+            }
+            print(f"Starting SIMI remote client process host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
+            proc = multiprocessing.Process(target=_launch_simi_remote, args=(str(data_path), central_host, central_port, active_site.SITE_ID, remote_port, algo_config))
+            proc.start()
+            child_pid = proc.pid
         
         print("Job started successfully")
         
@@ -566,7 +585,10 @@ async def start_job(
             'messages': ['Job started successfully'],
             'start_time': datetime.now(),
             'completed': False,
-            'site_id': active_site.SITE_ID  # Store site ID with the job
+            'site_id': active_site.SITE_ID,  # Store site ID with the job
+            'data_path': str(data_path),
+            'remote_port': remote_port,
+            'pid': child_pid
         }
         
         # Log for debugging job isolation

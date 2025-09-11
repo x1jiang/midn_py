@@ -6,7 +6,7 @@ CURRENT_DIR=$(pwd)
 OUTPUT_DIR="$CURRENT_DIR/SIMI/test_data/result"
 
 # Kill any process using ports 8000 to 8002
-for port in 8000 8001 8002; do
+for port in 8000; do
     pid=$(lsof -ti tcp:$port)
     if [ -n "$pid" ]; then
         echo "Killing process on port $port (PID $pid)"
@@ -31,12 +31,11 @@ echo "NOTE: You can manually kill the Python process from another terminal if ne
 
 # Run the Python process in foreground
 python run_imputation.py \
-  --algorithm SIMI \
-  --config_file "$CONFIG_FILE" \
-  --central_data "$CENTRAL_DATA" \
-  --remote_data "$REMOTE1_DATA" "$REMOTE2_DATA" \
-  --output "$PY_OUTPUT" \
-  --remote_ports 8001 8002
+    --algorithm SIMI \
+    --config_file "$CONFIG_FILE" \
+    --central_data "$CENTRAL_DATA" \
+    --remote_data "$REMOTE1_DATA" "$REMOTE2_DATA" \
+    --output "$PY_OUTPUT"
 
 # Print completion message regardless of whether Python was killed or finished naturally
 echo "Python execution completed or was manually killed. Continuing with evaluation..."
@@ -237,7 +236,7 @@ Rscript -e '
 echo "One-round imputation complete."
 
 # Clean up processes
-for port in 8000 8001 8002; do
+for port in 8000; do
     pid=$(lsof -ti tcp:$port)
     if [ -n "$pid" ]; then
         echo "Killing process on port $port (PID $pid)"

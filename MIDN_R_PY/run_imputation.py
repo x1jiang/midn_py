@@ -18,7 +18,7 @@ import numpy as np
 import multiprocessing
 import asyncio
 from fastapi import FastAPI, WebSocket
-from typing import List, Dict, Any, Union, Optional, Set
+from typing import List, Dict, Optional, Set
 
 # Global variables for WebSocket connections
 app = FastAPI()
@@ -110,56 +110,30 @@ async def websocket_endpoint(websocket: WebSocket, site_id: str):
         print(f"All expected sites are now connected: {', '.join(expected_sites)}", flush=True)
     
     try:
-        # Do not read from the websocket here; algorithm-specific code
-        # handles request/response to avoid concurrent recv conflicts.
         while True:
             await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        print(f"WebSocket {site_id} cancelled during shutdown", flush=True)
     except Exception as e:
         print(f"WebSocket connection with {site_id} closed: {str(e)}", flush=True)
-        # Remove the site from connected websockets
+    finally:
         if site_id in remote_websockets:
             del remote_websockets[site_id]
 
 # These functions have been combined into start_central_site
 
-def start_remote_site(data_file, algorithm, config, central_host, central_port, site_id, remote_port):
-    """Start a remote site process (SIMI or SIMICE)
-    
-    Parameters:
-    -----------
-    data_file : str
-        Path to the data file
-    algorithm : str
-        Algorithm to use ('SIMI' or 'SIMICE')
-    config : dict
-        Configuration parameters for the algorithm
-    central_host : str
-        Hostname of the central server
-    central_port : int
-        Port of the central server
-    site_id : str
-        ID of the remote site
-    remote_port : int
-        Port for the remote site
-    """
-    # Load data - same for both algorithms
+def start_remote_site(data_file, algorithm, config, central_host, central_port, site_id):
+    """Start a remote site as a pure outbound WebSocket client (no local port)."""
     D = pd.read_csv(data_file).values
-    
-    # Debug the data
     print(f"Remote {site_id} data shape: {D.shape}", flush=True)
     print(f"Remote {site_id} data contains NaN: {np.isnan(D).any()}", flush=True)
-    
-    # Import the appropriate module based on algorithm
     if algorithm.lower() == "simi":
         from SIMI.SIMIRemote import run_remote_client
     elif algorithm.lower() == "simice":
         from SIMICE.SIMICERemote import run_remote_client
     else:
         raise ValueError(f"Unsupported algorithm: {algorithm}")
-    
-    # Run the remote client with unified interface
-    # Both implementations now have identical signatures and handle their own conversions
-    run_remote_client(D, central_host, central_port, site_id, remote_port, config)
+    run_remote_client(D, central_host, central_port, site_id, None, config)
 
 # Import necessary modules for run_imputation
 import os
@@ -225,58 +199,32 @@ async def run_imputation(D, algorithm, config, site_ids, output_path=None):
         # Process and save imputed data - unified approach
         # Prepare output directory and file naming pattern based on algorithm
         if algorithm == "simi":
-            # For SIMI, output might be a file path
-            output_dir = os.path.dirname(output_path)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir, exist_ok=True)
-            # Define output file naming pattern
+            out_dir = os.path.dirname(output_path)
+            if out_dir and not os.path.exists(out_dir):
+                os.makedirs(out_dir, exist_ok=True)
             file_pattern = lambda i: f"{os.path.splitext(output_path)[0]}_{i+1:02d}.csv"
-        else:  # algorithm == "simice"
-            # For SIMICE, output is a directory
+        else:
             os.makedirs(output_path, exist_ok=True)
-            # Define output file naming pattern
             file_pattern = lambda i: f"{output_path}/central_imp_{i+1:02d}.csv"
-        # Identify binary columns based only on algorithm configuration
         binary_cols = []
-        
-        if algorithm == "simi":
+        if algorithm == "simi" and config.get("method", "").lower() == "logistic":
             mvar = config["mvar"]
-            if config.get("method", "").lower() == "logistic":
-                binary_cols.append(mvar)
-        else:  # algorithm == "simice"
-            mvar_list = config["mvar"]
-            type_list = config.get("type_list", [])
-            for j, j_type in zip(mvar_list, type_list):
-                if j_type.lower() == "logistic":
-                    binary_cols.append(j)
-        
+            binary_cols.append(mvar)
+        elif algorithm == "simice":
+            for var, t in zip(config.get("mvar", []), config.get("type_list", [])):
+                if t.lower() == "logistic":
+                    binary_cols.append(var)
         print(f"Binary columns identified from parameters: {binary_cols}", flush=True)
-        
-        # Save imputed datasets
         for i, D_imputed in enumerate(imputed_data):
-            # Create a DataFrame from the imputed data
             df_imputed = pd.DataFrame(D_imputed)
-            
-            # Process binary columns (ensure 0/1 values)
             for col in binary_cols:
-                print(f"Enforcing binary values for column index {col}", flush=True)
-                if isinstance(col, int):  # Direct column index
+                if isinstance(col, int) and 0 <= col < df_imputed.shape[1]:
                     df_imputed.iloc[:, col] = np.round(df_imputed.iloc[:, col]).clip(0, 1).astype(int)
-                else:  # Column name
-                    df_imputed[col] = np.round(df_imputed[col]).clip(0, 1).astype(int)
-            
-            # Create numbered output CSV file
             csv_filename = file_pattern(i)
-            
-            # Save as CSV 
             df_imputed.to_csv(csv_filename, index=False)
             print(f"Saved imputed dataset {i+1}/{len(imputed_data)} to {csv_filename}", flush=True)
-        
         print(f"Saving results to {output_path}", flush=True)
-        
-        # Signal completion
-        print("Imputation complete. Press Ctrl+C to exit.", flush=True)
-        
+        print("Imputation complete.", flush=True)
         return imputed_data
         
     except Exception as e:
@@ -394,55 +342,31 @@ def start_central_site(algorithm, port, expected_sites, data_file, config, outpu
         raise ValueError(f"Unsupported algorithm: {algorithm}")
 
 def run_imputation_processes(args):
-    """Run the central and remote processes based on algorithm selection"""
-    # Load algorithm-specific config
     with open(args.config_file, 'r') as f:
         config = json.load(f)
-    
-    # Setup site IDs
     site_ids = ["remote1", "remote2"]
     remote_processes = []
-    
-    # Create remote processes with explicit site IDs using the unified start_remote_site function
-    for i, remote_data in enumerate(args.remote_data[:2]):  # Limit to first two remote data files
-        site_id = f"remote{i+1}"
-        port = args.remote_ports[i] if i < len(args.remote_ports) else 8001 + i
-        print(f"Creating {args.algorithm} remote site {site_id} on port {port}", flush=True)
-        
-        # All remote processes use the same unified interface regardless of algorithm
-        remote_proc = multiprocessing.Process(
-            target=start_remote_site,
-            args=(remote_data, args.algorithm, config, args.central_host, args.central_port, site_id, port)
-        )
-        remote_processes.append((site_id, remote_proc))
-    
-    
-    # Prepare output path/directory based on algorithm
+    for i, remote_data in enumerate(args.remote_data[:2]):
+        site_id = site_ids[i]
+        print(f"Creating {args.algorithm} remote site {site_id}", flush=True)
+        proc = multiprocessing.Process(target=start_remote_site, args=(remote_data, args.algorithm, config, args.central_host, args.central_port, site_id))
+        remote_processes.append((site_id, proc))
     output_path = args.output_dir if args.algorithm.lower() == "simice" and args.output_dir else args.output
-    
-    # Start remote processes
     print("Starting remote processes...", flush=True)
-    for site_id, proc in remote_processes:
-        print(f"Starting {site_id} process...", flush=True)
+    for sid, proc in remote_processes:
+        print(f"Starting {sid} process...", flush=True)
         proc.start()
-        
-    # Give remote sites time to start up
-    time.sleep(2)
-    
-    # Start the central site directly instead of using multiprocessing
+    time.sleep(1)
     print(f"Starting {args.algorithm} central process...", flush=True)
-    # Call start_central_site directly 
-    start_central_site(args.algorithm, args.central_port, site_ids, args.central_data, config, output_path)
-    
-    # Note: The code below will only execute after the central site completes (when uvicorn exits)
-    # Wait for remote processes to finish
     try:
+        start_central_site(args.algorithm, args.central_port, site_ids, args.central_data, config, output_path)
+    finally:
+        print("Terminating remote processes...", flush=True)
+        for _, proc in remote_processes:
+            if proc.is_alive():
+                proc.terminate()
         for _, proc in remote_processes:
             proc.join()
-    except KeyboardInterrupt:
-        print("Shutting down...", flush=True)
-        for _, proc in remote_processes:
-            proc.terminate()
 
 def main():
     # Parse arguments
@@ -463,8 +387,7 @@ def main():
                         help="Central server hostname")
     parser.add_argument("--central_port", type=int, default=8000, 
                         help="Central server port")
-    parser.add_argument("--remote_ports", type=int, nargs="+", default=[8001, 8002], 
-                        help="Remote site ports")
+    # remote ports removed (remote remotes use outbound connections only)
     
     args = parser.parse_args()
     

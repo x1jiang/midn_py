@@ -1,0 +1,8 @@
+{
+    "mvar": [1, 7],
+    "type_list": ["logistic", "Gaussian"],
+    "m": 12,
+    "iter": 6,
+    "iter0": 7,
+    "hosts": ["localhost", "localhost"]
+}

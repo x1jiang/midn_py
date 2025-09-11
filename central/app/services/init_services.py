@@ -1,16 +1,8 @@
 """
-Initialize algorithm services for the central site.
+Deprecated: init_services is no longer used. Algorithms are orchestrated directly from central/app/main.py.
 """
 
-from central.app.services.algorithm_factory import AlgorithmServiceFactory
+# No imports here on purpose; this module is deprecated.
 
-# Import service implementations
-from central.app.services.simi_service import SIMIService
-from central.app.services.simice_service import SIMICEService
-
-# Register services
-AlgorithmServiceFactory.register_service("SIMI", SIMIService)
-AlgorithmServiceFactory.register_service("SIMICE", SIMICEService)
-
-# Import algorithm registry to ensure all algorithms are registered
-import common.algorithm.register
+def initialize_services(*args, **kwargs):  # pragma: no cover - deprecated stub
+    raise RuntimeError("init_services is deprecated; use the new runner in central/app/main.py")

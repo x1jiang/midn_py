@@ -6,7 +6,7 @@ CURRENT_DIR=$(pwd)
 OUTPUT_DIR="$CURRENT_DIR/SIMI/test_data/result"
 
 # Kill any process using ports 8000 to 8002
-for port in 8000 8001 8002; do
+for port in 8000; do
     pid=$(lsof -ti tcp:$port)
     if [ -n "$pid" ]; then
         echo "Killing process on port $port (PID $pid)"
@@ -29,20 +29,23 @@ PY_OUTPUT="$OUTPUT_DIR/central_imp"
 echo "Running unified imputation for SIMI (Gaussian)..."
 echo "NOTE: You can manually kill the Python process from another terminal if needed"
 
+
 # Run the Python process in foreground
 python run_imputation.py \
-  --algorithm SIMI \
-  --config_file "$CONFIG_FILE" \
-  --central_data "$CENTRAL_DATA" \
-  --remote_data "$REMOTE1_DATA" "$REMOTE2_DATA" \
-  --output "$PY_OUTPUT" \
-  --remote_ports 8001 8002
+	--algorithm SIMI \
+	--config_file "$CONFIG_FILE" \
+	--central_data "$CENTRAL_DATA" \
+	--remote_data "$REMOTE1_DATA" "$REMOTE2_DATA" \
+	--output "$PY_OUTPUT"
 
 # Print completion message regardless of whether Python was killed or finished naturally
 echo "Python execution completed or was manually killed. Continuing with evaluation..."
 
-# Evaluate the imputation results using R (reusing existing evaluation code)
-echo "Evaluating imputation results..."
+if command -v Rscript >/dev/null 2>&1; then
+	echo "Evaluating imputation results..."
+else
+	echo "Rscript not found in PATH. Skipping R-based evaluation steps."; SKIP_R=1
+fi
 
 # Define the correct paths for truth data
 TRUTH_DATA="${CENTRAL_DATA/continuous_central.csv/continuous_central_truth.csv}"
@@ -58,7 +61,7 @@ for m in $(seq 1 10); do  # m=10 from config file
     fi
 done
 
-if [ $IMPUTATION_FILES_EXIST -eq 1 ]; then
+if [ $IMPUTATION_FILES_EXIST -eq 1 ] && [ -z "$SKIP_R" ]; then
     Rscript -e '
         central_data <- as.matrix(read.csv("'$CENTRAL_DATA'"));
         mvar <- as.integer("'$MVAR_VALUE'");
@@ -96,6 +99,7 @@ fi
 
 
 # Add one-round imputation using combined data from all sites
+if [ -z "$SKIP_R" ]; then
 echo "Performing one-round imputation using combined data from all sites using linear regression..."
 Rscript -e '
 	# Read all datasets with headers
@@ -172,9 +176,10 @@ Rscript -e '
 	cat("----------------------------------------------\n")
 '
 echo "One-round imputation complete."
+fi
 
 # Clean up processes
-for port in 8000 8001 8002; do
+for port in 8000; do
     pid=$(lsof -ti tcp:$port)
     if [ -n "$pid" ]; then
         echo "Killing process on port $port (PID $pid)"

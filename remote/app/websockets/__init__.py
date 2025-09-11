@@ -1,9 +1,3 @@
 """
-WebSocket handling for remote algorithms.
+Deprecated package: remote.app.websockets is not used.
 """
-
-from .connection_client import ConnectionClient
-
-__all__ = [
-    'ConnectionClient'
-]

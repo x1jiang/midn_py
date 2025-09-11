@@ -48,3 +48,5 @@ def delete_job(db: Session, job_id: int):
     db.delete(db_job)
     db.commit()
     return True
+
+

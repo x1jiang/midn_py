@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, Depends, UploadFile, File, HTTPException, Request, Form
+from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Request, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -6,23 +6,44 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 import pandas as pd
 import asyncio
-import secrets
 from datetime import datetime, timedelta
+from typing import Dict, Optional, Set, Any, List
+from pathlib import Path
+import json
+import logging
+import numpy as np
+import zipfile
+import io
+import sys
 
 from . import models, schemas, services
 from .db import get_db, engine
-from .core import security
 from .core.config import settings
 from .core.csrf import get_csrf_token, gen_csrf_token, CSRF_COOKIE
-from .websockets.connection_manager import ConnectionManager
 from .api import users as sites_api, jobs, remote as remote_api
-from .services.algorithm_factory import AlgorithmServiceFactory
 from starlette.middleware.base import BaseHTTPMiddleware
 
-# Initialize algorithm services
-from .services.init_services import *
+# Keep DB models
 
 models.Base.metadata.create_all(bind=engine)
+
+# Startup migration: normalize legacy SIMICE 'is_binary' list key to 'is_binary_list'
+try:  # non-critical
+    from .db import SessionLocal  # type: ignore
+    with SessionLocal() as _m:  # type: ignore
+        jobs_fix = _m.query(models.Job).filter(models.Job.algorithm == "SIMICE").all()  # type: ignore
+        changed = False
+        for j in jobs_fix:
+            if isinstance(j.parameters, dict) and "is_binary_list" not in j.parameters and isinstance(j.parameters.get("is_binary"), list):
+                j.parameters["is_binary_list"] = j.parameters.pop("is_binary")
+                changed = True
+        if changed:
+            _m.commit()
+except Exception:
+    pass
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -44,379 +65,85 @@ app.include_router(sites_api.router, prefix="/api/sites", tags=["sites"])
 app.include_router(remote_api.router, prefix="/api/remote", tags=["remote"])
 app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 
-# Import job status router
-from .api import job_status
-app.include_router(job_status.router, prefix="/api/jobs", tags=["jobs"])
+# Legacy job status router removed; using lightweight /api/jobs/status/{job_id} defined below
+
+# -------- New lightweight WS + job runner (mimic MIDN_R_PY/run_imputation.py) --------
+# Allow importing algorithm modules under MIDN_R_PY without modifying them
+sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
+
+# Global WS state and job tracking
+remote_websockets: Dict[str, WebSocket] = {}
+site_locks: Dict[str, asyncio.Lock] = {}
+expected_sites: Optional[Set[str]] = None
+all_sites_connected = asyncio.Event()
+imputation_running = asyncio.Event()
+jobs_runtime: Dict[int, Dict[str, Any]] = {}
+# Store results under the publicly served static directory so they can be accessed if needed
+# Path: central/app/static/results (user requirement: central/static/results; project layout uses app/static)
+RESULTS_DIR = Path(__file__).resolve().parent / "static" / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Direct test endpoint for checking running jobs
 @app.get("/test/job-check")
 def test_job_check():
-    try:
-        from .services.job_status import JobStatusTracker
-        tracker = JobStatusTracker()
-        try:
-            # Get the first running job ID
-            running_job_id = tracker.get_first_running_job_id()
-            
-            # Initialize result with running job ID
-            result = {"running_job_id": int(running_job_id) if running_job_id is not None else None}
-            
-            # Add more detailed job status information
-            if running_job_id is not None:
-                job_status = tracker.get_job_status(running_job_id)
-                if job_status:
-                    result["job_details"] = {
-                        "job_id": job_status.job_id,
-                        "status": job_status.status,
-                        "completed": job_status.completed,
-                        "error": job_status.error,
-                        "last_message": job_status.messages[-1] if job_status.messages else "No messages",
-                        "message_count": len(job_status.messages),
-                    }
-                else:
-                    result["job_details"] = {"status": "Job found in tracker but no details available"}
-            
-            # Also show all jobs currently being tracked
-            all_jobs = {}
-            for jid, jstatus in tracker.jobs.items():
-                all_jobs[jid] = {
-                    "status": jstatus.status,
-                    "completed": jstatus.completed,
-                    "last_message": jstatus.messages[-1] if jstatus.messages else "No messages",
-                }
-            
-            result["all_tracked_jobs"] = all_jobs
-            print(f"Checking for running jobs: {result}")
-            
-            # Check if there are any registered instances for algorithms in the factory
-            from .services.algorithm_factory import AlgorithmServiceFactory
-            result["registered_algorithms"] = list(AlgorithmServiceFactory._service_classes.keys())
-            result["active_algorithm_instances"] = list(AlgorithmServiceFactory._service_instances.keys())
-            
-            # For debugging, try to get the SIMICE service and check actual job dictionary
-            try:
-                # Use the global manager instance instead of creating a new one
-                simice_service = AlgorithmServiceFactory.create_service("SIMICE", manager)
-                result["simice_service_check"] = "OK"
-                
-                # DEBUG: Get actual job dictionary information
-                if running_job_id and hasattr(simice_service, 'jobs') and running_job_id in simice_service.jobs:
-                    actual_job = simice_service.jobs[running_job_id]
-                    result["actual_job_dict"] = {
-                        "status": actual_job.get("status"),
-                        "participants": actual_job.get("participants", []),
-                        "connected_sites": actual_job.get("connected_sites", []),
-                        "ready_sites": actual_job.get("ready_sites", []),
-                        "parameters": actual_job.get("parameters", {}),
-                        "creation_time": actual_job.get("creation_time")
-                    }
-                    # Also add detailed comparison for debugging
-                    from common.algorithm.job_protocol import JobStatus
-                    result["debug_info"] = {
-                        "job_status_is_waiting": actual_job.get("status") == JobStatus.WAITING.value,
-                        "waiting_value": JobStatus.WAITING.value,
-                        "actual_status_value": actual_job.get("status"),
-                        "all_sites_ready": set(actual_job.get("ready_sites", [])) == set(actual_job.get("participants", [])),
-                        "ready_sites_set": list(set(actual_job.get("ready_sites", []))),
-                        "participants_set": list(set(actual_job.get("participants", [])))
-                    }
-                else:
-                    result["actual_job_dict"] = "No job found in SIMICE service jobs dictionary"
-                    
-            except Exception as e:
-                result["simice_service_error"] = str(e)
-            print(f"Checking for running jobs: {result}")
-            return result
-        except Exception as e:
-            print(f"Error checking for running jobs: {str(e)}")
-            # Fall back to a simple response if there's an error
-            return {"running_job_id": None, "error": str(e)}
-    except Exception as e:
-        print(f"Critical error in test_job_check: {str(e)}")
-        # Ultra fallback
-        return {"running_job_id": None, "critical_error": str(e)}
+    for jid, info in jobs_runtime.items():
+        if info.get("running") and not info.get("completed"):
+            return {"running_job_id": jid}
+    return {"running_job_id": None}
 
 # Debug endpoint to manually trigger start computation
 @app.get("/debug/trigger-start-computation/{job_id}")
 async def debug_trigger_start_computation(job_id: int):
-    """Manually trigger start computation for debugging."""
-    try:
-        print(f"🔧 DEBUG: Manually triggering start computation for job {job_id}")
-        
-        # Get the algorithm service
-        from .services.algorithm_factory import AlgorithmServiceFactory
-        from common.algorithm.job_protocol import JobStatus
-        
-        # Use the global manager instance instead of creating a new one
-        
-        # Check what services are available
-        print(f"📋 Available services: {list(AlgorithmServiceFactory._service_instances.keys())}")
-        
-        # Try to get SIMICE service
-        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
-            return {"error": "SIMICE service not available", "available_services": list(AlgorithmServiceFactory._service_instances.keys())}
-        
-        simice_service = AlgorithmServiceFactory._service_instances["SIMICE"]
-        
-        if job_id not in simice_service.jobs:
-            return {"error": f"Job {job_id} not found", "available_jobs": list(simice_service.jobs.keys())}
-        
-        job = simice_service.jobs[job_id]
-        
-        # Log current state
-        current_state = {
-            "status": job.get("status"),
-            "participants": job.get("participants", []),
-            "connected_sites": job.get("connected_sites", []),
-            "ready_sites": job.get("ready_sites", [])
-        }
-        print(f"🔍 Current job state: {current_state}")
-        
-        # Manually fix the job status and ready sites
-        site_ids = ["224bdbc5", "863a2efd"]
-        
-        # Ensure sites are connected
-        for site_id in site_ids:
-            if site_id not in job.get("connected_sites", []):
-                job.setdefault("connected_sites", []).append(site_id)
-                print(f"✅ Added {site_id} to connected sites")
-        
-        # Set job status to waiting
-        if job["status"] != JobStatus.WAITING.value:
-            print(f"🔧 Fixing job status from '{job['status']}' to '{JobStatus.WAITING.value}'")
-            job["status"] = JobStatus.WAITING.value
-        
-        # Manually trigger site_ready for both sites
-        for site_id in site_ids:
-            site_ready_data = {
-                "type": "site_ready",
-                "job_id": job_id,
-                "site_id": site_id,
-                "status": "ready"
-            }
-            print(f"📤 Triggering site_ready for {site_id}...")
-            await simice_service._handle_site_ready(site_id, site_ready_data)
-        
-        # Return final state
-        final_state = {
-            "status": job.get("status"),
-            "participants": job.get("participants", []),
-            "connected_sites": job.get("connected_sites", []),
-            "ready_sites": job.get("ready_sites", [])
-        }
-        
-        return {
-            "message": "Start computation triggered",
-            "initial_state": current_state,
-            "final_state": final_state
-        }
-        
-    except Exception as e:
-        print(f"❌ Error in debug trigger: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
+    return {"message": "Not applicable with new runner"}
 
 
 # Debug endpoint to restart SIMICE iteration
 @app.get("/debug/restart-iteration/{job_id}")
 async def debug_restart_iteration(job_id: int):
-    try:
-        print(f"🔧 DEBUG: Starting restart for job {job_id}")
-        
-        from .services.algorithm_factory import AlgorithmServiceFactory
-        from .services.job_status import JobStatusTracker
-        
-        # Check if job is running
-        tracker = JobStatusTracker()
-        running_job_id = tracker.get_first_running_job_id()
-        print(f"🔧 DEBUG: Running job ID: {running_job_id}")
-        
-        if running_job_id != job_id:
-            return {"error": f"Job {job_id} is not currently running (running job: {running_job_id})"}
-        
-        # Get the algorithm service from the factory's cache
-        print(f"🔧 DEBUG: Available service instances: {list(AlgorithmServiceFactory._service_instances.keys())}")
-        
-        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
-            return {"error": "SIMICE service instance not found"}
-            
-        service = AlgorithmServiceFactory._service_instances["SIMICE"]
-        print(f"🔧 DEBUG: Got SIMICE service instance")
-        print(f"🔧 DEBUG: Available job data: {list(service.job_data.keys())}")
-        
-        if job_id not in service.job_data:
-            return {"error": f"Job {job_id} data not found in SIMICE service"}
-        
-        job_data = service.job_data[job_id]
-        print(f"🔧 DEBUG: Current job state - waiting_for_statistics: {job_data.get('waiting_for_statistics')}")
-        print(f"🔧 DEBUG: Current job state - waiting_for_updates: {job_data.get('waiting_for_updates')}")
-        print(f"🔧 DEBUG: Current job state - connected_sites: {job_data.get('connected_sites')}")
-        
-        # Clear the waiting states to reset the algorithm
-        job_data['waiting_for_statistics'] = set()
-        job_data['waiting_for_updates'] = set()
-        print(f"🔧 DEBUG: Cleared waiting states")
-        
-        # Force restart the current iteration
-        print(f"🔧 DEBUG: Calling _run_simice_iteration for job {job_id}")
-        try:
-            await service._run_simice_iteration(job_id)
-            print(f"🔧 DEBUG: _run_simice_iteration completed successfully")
-        except Exception as iter_error:
-            print(f"💥 DEBUG: Error in _run_simice_iteration: {iter_error}")
-            import traceback
-            traceback.print_exc()
-            return {"error": f"Error in iteration: {str(iter_error)}", "job_data": str(job_data)}
-        
-        return {"message": f"Restarted iteration for job {job_id}", "job_data": str(job_data)}
-        
-    except Exception as e:
-        print(f"💥 DEBUG ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
+    return {"message": "Not applicable with new runner"}
 
 # Additional debug endpoint to directly send statistics requests
 @app.get("/debug/send-stats-request/{job_id}")
 async def debug_send_stats_request(job_id: int):
-    try:
-        print(f"🔧 DEBUG STATS: Starting stats request for job {job_id}")
-        
-        from .services.algorithm_factory import AlgorithmServiceFactory
-        from common.algorithm.job_protocol import create_message
-        
-        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
-            return {"error": "SIMICE service instance not found"}
-            
-        service = AlgorithmServiceFactory._service_instances["SIMICE"]
-        
-        if job_id not in service.job_data:
-            return {"error": f"Job {job_id} data not found"}
-        
-        job_data = service.job_data[job_id]
-        connected_sites = job_data.get('connected_sites', set())
-        target_column_indexes = job_data.get('target_column_indexes', [])
-        is_binary = job_data.get('is_binary', [])
-        
-        if not connected_sites:
-            return {"error": "No connected sites"}
-        
-        # Send statistics request for first target column
-        target_col_idx = target_column_indexes[0] - 1  # Convert to 0-based
-        method = "logistic" if is_binary[0] else "gaussian"
-        
-        print(f"🔧 DEBUG STATS: Sending stats request for column {target_col_idx} ({method})")
-        
-        results = []
-        for site_id in connected_sites:
-            try:
-                message = create_message(
-                    "compute_statistics",
-                    job_id=job_id,
-                    target_col_idx=target_col_idx,
-                    method=method
-                )
-                
-                print(f"📤 DEBUG STATS: Sending to site {site_id}: {message}")
-                await service.manager.send_to_site(message, site_id)
-                results.append(f"Sent to {site_id}: SUCCESS")
-                print(f"✅ DEBUG STATS: Successfully sent to site {site_id}")
-                
-            except Exception as send_error:
-                results.append(f"Sent to {site_id}: ERROR - {str(send_error)}")
-                print(f"💥 DEBUG STATS: Error sending to site {site_id}: {send_error}")
-        
-        # Update job state
-        job_data['waiting_for_statistics'] = set(connected_sites)
-        job_data['statistics'][f"{target_col_idx}_{method}"] = {}
-        
-        return {
-            "message": f"Sent statistics requests for job {job_id}",
-            "target_column": target_col_idx,
-            "method": method,
-            "results": results,
-            "connected_sites": list(connected_sites)
-        }
-        
-    except Exception as e:
-        print(f"💥 DEBUG STATS ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
+    return {"message": "Not applicable with new runner"}
 
 # Debug endpoint to directly send update_imputations messages
 @app.get("/debug/send-updates/{job_id}")
 async def debug_send_updates(job_id: int):
+    return {"message": "Not applicable with new runner"}
+
+
+# --- WebSocket endpoint (no ConnectionManager, direct registry) ---
+def _set_expected_sites(sites: List[str]):
+    global expected_sites
+    expected_sites = set(sites)
+    all_sites_connected.clear()
+
+@app.websocket("/ws/{site_id}")
+async def websocket_endpoint(websocket: WebSocket, site_id: str):
+    # Import here so dynamic sys.path modification above is in effect; avoids static analysis error
     try:
-        print(f"🔧 DEBUG UPDATES: Starting updates for job {job_id}")
-        
-        from .services.algorithm_factory import AlgorithmServiceFactory
-        from common.algorithm.job_protocol import create_message
-        import numpy as np
-        
-        if "SIMICE" not in AlgorithmServiceFactory._service_instances:
-            return {"error": "SIMICE service instance not found"}
-            
-        service = AlgorithmServiceFactory._service_instances["SIMICE"]
-        
-        if job_id not in service.job_data:
-            return {"error": f"Job {job_id} data not found"}
-        
-        job_data = service.job_data[job_id]
-        connected_sites = job_data.get('connected_sites', set())
-        target_column_indexes = job_data.get('target_column_indexes', [])
-        
-        if not connected_sites:
-            return {"error": "No connected sites"}
-        
-        # Send dummy update_imputations for first target column
-        target_col_idx = target_column_indexes[0] - 1  # Convert to 0-based
-        
-        print(f"🔧 DEBUG UPDATES: Sending updates for column {target_col_idx}")
-        
-        # Create dummy imputation values (random numbers for testing)
-        np.random.seed(42)  # For reproducible results
-        dummy_imputations = np.random.normal(0, 1, 100).tolist()  # 100 dummy values
-        
-        results = []
-        for site_id in connected_sites:
-            try:
-                message = create_message(
-                    "update_imputations",
-                    job_id=job_id,
-                    target_col_idx=target_col_idx,
-                    imputations=dummy_imputations[:50]  # Send 50 values per site
-                )
-                
-                print(f"📤 DEBUG UPDATES: Sending to site {site_id}: update_imputations with {len(dummy_imputations[:50])} values")
-                await service.manager.send_to_site(message, site_id)
-                results.append(f"Sent to {site_id}: SUCCESS")
-                print(f"✅ DEBUG UPDATES: Successfully sent to site {site_id}")
-                
-            except Exception as send_error:
-                results.append(f"Sent to {site_id}: ERROR - {str(send_error)}")
-                print(f"💥 DEBUG UPDATES: Error sending to site {site_id}: {send_error}")
-        
-        # Update job state
-        job_data['waiting_for_updates'] = set()  # Clear waiting state
-        
-        return {
-            "message": f"Sent update_imputations for job {job_id}",
-            "target_column": target_col_idx,
-            "results": results,
-            "connected_sites": list(connected_sites),
-            "imputation_count": len(dummy_imputations[:50])
-        }
-        
-    except Exception as e:
-        print(f"💥 DEBUG UPDATES ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e)}
-
-
-manager = ConnectionManager()
+        from Core.transfer import write_string  # type: ignore
+    except Exception:
+        write_string = None  # Fallback; will skip heartbeat if protocol helper not available
+    if site_id not in site_locks:
+        site_locks[site_id] = asyncio.Lock()
+    await websocket.accept()
+    remote_websockets[site_id] = websocket
+    try:
+        if expected_sites and expected_sites.issubset(set(remote_websockets.keys())):
+            all_sites_connected.set()
+        # Lightweight keepalive; algorithm coroutines own send/recv
+        while True:
+            await asyncio.sleep(30)
+            # Don't ping during active imputation to avoid interfering with recv
+            if not imputation_running.is_set() and write_string:
+                try:
+                    await write_string("ping", websocket)
+                except Exception:
+                    break
+    finally:
+        remote_websockets.pop(site_id, None)
 
 # Algorithm services will be created dynamically using the factory
 
@@ -592,14 +319,14 @@ async def gui_jobs_create_post(
             return HTMLResponse("Iteration fields are required for SIMICE", status_code=400)
         params = {
             "target_column_indexes": idxs,
-            "is_binary": bins,
+            "is_binary_list": bins,
             "iteration_before_first_imputation": iteration_before_first_imputation,
             "iteration_between_imputations": iteration_between_imputations
         }
         # For multi-feature, missing_spec can mirror params specific fields
         missing_spec = {
             "target_column_indexes": idxs,
-            "is_binary": bins,
+            "is_binary_list": bins,
             "iteration_before_first_imputation": iteration_before_first_imputation,
             "iteration_between_imputations": iteration_between_imputations
         }
@@ -618,75 +345,61 @@ async def gui_jobs_create_post(
     db_job = services.job_service.create_job(db, job, owner_id=None)
     return templates.TemplateResponse("confirm.html", {"request": request, "message": f"Job created. ID={db_job.id}"})
 
-# Start Job (GUI)
+# Start Job (GUI) - list all jobs for selection
 @app.get("/gui/jobs/start", response_class=HTMLResponse)
 async def gui_jobs_start_get(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
         return RedirectResponse(url="/gui/login")
     token = get_csrf_token(request) or gen_csrf_token()
-    
-    # Get all jobs and convert them to serializable dictionaries
+
     db_jobs = services.job_service.get_jobs(db, 0, 1000)
-    jobs = []
+    jobs: List[Dict[str, Any]] = []
     for job in db_jobs:
-        # Create job dict with fields in a consistent order matching the job creation form
-        job_dict = {
-            # Basic job information (top of form)
+        job_dict: Dict[str, Any] = {
             "id": job.id,
             "algorithm": job.algorithm,
             "name": job.name,
             "description": job.description,
             "participants": job.participants,
             "status": job.status,
-            
-            # Algorithm-specific parameters in order they appear in the form
             "parameters": {},
         }
-        
-        # Copy all parameters with proper ordering based on algorithm
         if job.parameters:
             if job.algorithm == "SIMI":
-                # Order SIMI parameters
-                ordered_params = {}
+                ordered_params: Dict[str, Any] = {}
                 if "target_column_index" in job.parameters:
                     ordered_params["target_column_index"] = job.parameters["target_column_index"]
                 if "is_binary" in job.parameters:
                     ordered_params["is_binary"] = job.parameters["is_binary"]
-                # Add any remaining parameters
-                for key, value in job.parameters.items():
-                    if key not in ordered_params:
-                        ordered_params[key] = value
+                for k, v in job.parameters.items():
+                    if k not in ordered_params:
+                        ordered_params[k] = v
                 job_dict["parameters"] = ordered_params
             elif job.algorithm == "SIMICE":
-                # Order SIMICE parameters
                 ordered_params = {}
                 if "target_column_indexes" in job.parameters:
                     ordered_params["target_column_indexes"] = job.parameters["target_column_indexes"]
                 if "is_binary_list" in job.parameters:
                     ordered_params["is_binary_list"] = job.parameters["is_binary_list"]
-                # Add any remaining parameters
-                for key, value in job.parameters.items():
-                    if key not in ordered_params:
-                        ordered_params[key] = value
+                for k, v in job.parameters.items():
+                    if k not in ordered_params:
+                        ordered_params[k] = v
                 job_dict["parameters"] = ordered_params
             else:
-                # For other algorithms, just use the parameters as-is
                 job_dict["parameters"] = job.parameters
-        
-        # Add the remaining job properties at the end (bottom of form)
         job_dict["iteration_before_first_imputation"] = job.iteration_before_first_imputation
         job_dict["iteration_between_imputations"] = job.iteration_between_imputations
         job_dict["imputation_trials"] = job.imputation_trials
         job_dict["missing_spec"] = job.missing_spec
         job_dict["owner_id"] = job.owner_id
-        
         jobs.append(job_dict)
-    
+
     resp = templates.TemplateResponse("start_job.html", {"request": request, "csrf_token": token, "jobs": jobs})
     if not get_csrf_token(request):
         resp.set_cookie(CSRF_COOKIE, token, httponly=False, samesite="lax")
     return resp
 
+# Start Job using new runner
 @app.post("/gui/jobs/start", response_class=HTMLResponse)
 async def gui_jobs_start_post(
     request: Request,
@@ -706,76 +419,278 @@ async def gui_jobs_start_post(
     
     try:
         central_data = pd.read_csv(central_data_file.file)
-        
-        # Get all jobs and convert them to serializable dictionaries - for reloading the form
-        db_jobs = services.job_service.get_jobs(db, 0, 1000)
+        print(f"db_job: {db_job}")
+        # Only serialize the selected job (no need to load ALL jobs)
+        job = db_job  # alias
         jobs = []
-        for job in db_jobs:
-            # Create job dict with fields in a consistent order (same as the GET handler)
-            job_dict = {
-                "id": job.id,
-                "algorithm": job.algorithm,
-                "name": job.name,
-                "description": job.description,
-                "participants": job.participants,
-                "status": job.status,
-                "parameters": {},
-            }
-            
-            # Copy parameters with proper ordering based on algorithm
-            if job.parameters:
-                if job.algorithm == "SIMI":
-                    ordered_params = {}
-                    if "target_column_index" in job.parameters:
-                        ordered_params["target_column_index"] = job.parameters["target_column_index"]
-                    if "is_binary" in job.parameters:
-                        ordered_params["is_binary"] = job.parameters["is_binary"]
-                    for key, value in job.parameters.items():
-                        if key not in ordered_params:
-                            ordered_params[key] = value
-                    job_dict["parameters"] = ordered_params
-                elif job.algorithm == "SIMICE":
-                    ordered_params = {}
-                    if "target_column_indexes" in job.parameters:
-                        ordered_params["target_column_indexes"] = job.parameters["target_column_indexes"]
-                    if "is_binary_list" in job.parameters:
-                        ordered_params["is_binary_list"] = job.parameters["is_binary_list"]
-                    for key, value in job.parameters.items():
-                        if key not in ordered_params:
-                            ordered_params[key] = value
-                    job_dict["parameters"] = ordered_params
-                else:
-                    job_dict["parameters"] = job.parameters
-            
-            # Add the remaining job properties at the end
-            job_dict["iteration_before_first_imputation"] = job.iteration_before_first_imputation
-            job_dict["iteration_between_imputations"] = job.iteration_between_imputations
-            job_dict["imputation_trials"] = job.imputation_trials
-            job_dict["missing_spec"] = job.missing_spec
-            job_dict["owner_id"] = job.owner_id
-            
-            jobs.append(job_dict)
+        job_dict = {
+            "id": job.id,
+            "algorithm": job.algorithm,
+            "name": job.name,
+            "description": job.description,
+            "participants": job.participants,
+            "status": job.status,
+            "parameters": {},
+        }
+        if job.parameters:
+            if job.algorithm == "SIMI":
+                ordered_params = {}
+                if "target_column_index" in job.parameters:
+                    ordered_params["target_column_index"] = job.parameters["target_column_index"]
+                if "is_binary" in job.parameters:
+                    ordered_params["is_binary"] = job.parameters["is_binary"]
+                for key, value in job.parameters.items():
+                    if key not in ordered_params:
+                        ordered_params[key] = value
+                job_dict["parameters"] = ordered_params
+            elif job.algorithm == "SIMICE":
+                ordered_params = {}
+                if "target_column_indexes" in job.parameters:
+                    ordered_params["target_column_indexes"] = job.parameters["target_column_indexes"]
+                if "is_binary_list" in job.parameters:
+                    ordered_params["is_binary_list"] = job.parameters["is_binary_list"]
+                for key, value in job.parameters.items():
+                    if key not in ordered_params:
+                        ordered_params[key] = value
+                job_dict["parameters"] = ordered_params
+            else:
+                job_dict["parameters"] = job.parameters
+        job_dict["iteration_before_first_imputation"] = job.iteration_before_first_imputation
+        job_dict["iteration_between_imputations"] = job.iteration_between_imputations
+        job_dict["imputation_trials"] = job.imputation_trials
+        job_dict["missing_spec"] = job.missing_spec
+        job_dict["owner_id"] = job.owner_id
+        jobs.append(job_dict)
         
-        # Dispatch based on algorithm
-        algorithm_name = (db_job.algorithm or "").upper()
-        try:
-            algorithm_service = AlgorithmServiceFactory.create_service(algorithm_name, manager)
-            asyncio.create_task(algorithm_service.start_job(db_job, central_data))
-            # Return to the same page with job_id pre-selected
+        # Start with SIMI/SIMICE by calling algorithm central directly
+        algorithm_name = (db_job.algorithm or "").lower()
+        if algorithm_name not in ("simi", "simice"):
             return templates.TemplateResponse("start_job.html", {
-                "request": request, 
-                "csrf_token": csrf_token, 
+                "request": request,
+                "csrf_token": csrf_token,
                 "jobs": jobs,
-                "active_job_id": job_id,  # Pass the active job ID to highlight it
-                "message": f"Job {job_id} started. Monitoring status..."
+                "error": f"Unsupported algorithm {db_job.algorithm}"
             })
-        except ValueError as e:
-            return templates.TemplateResponse("start_job.html", {
-                "request": request, 
-                "csrf_token": csrf_token, 
-                "jobs": jobs,
-                "error": str(e)
+        print(f"Starting job {job_id} with algorithm {db_job.algorithm} for sites {db_job.participants}")
+        print(f"DB Job parameters: {db_job.parameters}")
+        
+        # Build base config from stored parameters then normalize per algorithm expectations
+        raw_params: Dict[str, Any] = dict(db_job.parameters or {})
+        config: Dict[str, Any] = {}
+        if algorithm_name == "simi":
+            # Expected keys for SIMI central: M, mvar (0-based), method (Gaussian|logistic)
+            # Source fields from stored params / job fields:
+            # - imputation_trials -> M (fallback 1)
+            # - target_column_index (assumed 1-based from UI) -> mvar (0-based)
+            # - is_binary -> method logistic else Gaussian
+            target_idx = raw_params.get("target_column_index")
+            if target_idx is not None:
+                # Accept either 0-based or 1-based: treat ints >0; if user provided 0 assume already 0-based
+                try:
+                    t_int = int(target_idx)
+                    mvar = t_int - 1 if t_int > 0 else t_int
+                except Exception:
+                    mvar = target_idx
+            else:
+                mvar = raw_params.get("mvar")  # allow direct provision
+            method = None
+            if "is_binary" in raw_params:
+                method = "logistic" if raw_params.get("is_binary") else "Gaussian"
+            elif "method" in raw_params:
+                method = raw_params["method"]
+            config["M"] = db_job.imputation_trials or raw_params.get("M") or 1
+            if mvar is not None:
+                config["mvar"] = mvar
+            if method is not None:
+                config["method"] = method
+            # Copy any other untouched params (avoid overwriting the normalized ones)
+            for k, v in raw_params.items():
+                if k not in ("target_column_index", "is_binary", "mvar", "method") and k not in config:
+                    config[k] = v
+            print(f"SIMI config constructed: {config}")        
+        elif algorithm_name == "simice":
+            # Simplified mapping for SIMICE expected keys: M, mvar (0-based list), type_list, iter_val, iter0_val
+            def _int_list(val):
+                if val is None:
+                    return []
+                if isinstance(val, str):
+                    parts = [p.strip() for p in val.split(',') if p.strip()]
+                else:
+                    parts = list(val)
+                out: List[int] = []
+                for p in parts:
+                    try:
+                        iv = int(p)
+                        out.append(iv - 1 if iv > 0 else iv)
+                    except Exception:
+                        continue
+                return out
+
+            # mvar sources: target_column_indexes (UI, 1-based) or existing mvar
+            mvar_list = _int_list(raw_params.get("target_column_indexes") or raw_params.get("mvar"))
+
+            # type_list: direct or derive from is_binary_list / is_binary
+            if "type_list" in raw_params and isinstance(raw_params.get("type_list"), list):
+                type_list = raw_params["type_list"]
+            else:
+                bin_list = None
+                if "is_binary_list" in raw_params:
+                    bin_list = raw_params["is_binary_list"]
+                elif "is_binary" in raw_params and isinstance(raw_params.get("is_binary"), list):
+                    bin_list = raw_params["is_binary"]
+                elif "is_binary" in raw_params and mvar_list:
+                    bin_list = [raw_params["is_binary"]] * len(mvar_list)
+                type_list = ["logistic" if b else "Gaussian" for b in (bin_list or [])]
+
+            # Iterations: prefer DB columns, then canonical keys, then GUI keys
+            iter_val = (db_job.iteration_between_imputations
+                        if db_job.iteration_between_imputations is not None else
+                        raw_params.get("iter_val", raw_params.get("iteration_between_imputations")))
+            iter0_val = (db_job.iteration_before_first_imputation
+                         if db_job.iteration_before_first_imputation is not None else
+                         raw_params.get("iter0_val", raw_params.get("iteration_before_first_imputation")))
+
+            config.update({
+                "M": db_job.imputation_trials or raw_params.get("M") or 1,
             })
+            if mvar_list:
+                config["mvar"] = mvar_list
+            if type_list:
+                config["type_list"] = type_list
+            if iter_val is not None:
+                config["iter_val"] = iter_val
+            if iter0_val is not None:
+                config["iter0_val"] = iter0_val
+
+            # Pass through any extra keys (excluding GUI-only / duplicates)
+            skip = {"target_column_indexes", "is_binary_list", "is_binary",
+                    "iteration_before_first_imputation", "iteration_between_imputations",
+                    "mvar", "type_list", "iter_val", "iter0_val"}
+            for k, v in raw_params.items():
+                if k in skip or k in config:
+                    continue
+                config[k] = v
+            print(f"SIMICE config constructed: {config}")
+        else:
+            config = raw_params
+        # participants hold site IDs
+        site_ids: List[str] = list(db_job.participants or [])
+        # prepare numpy matrix
+        D = central_data.values
+
+        # init job runtime record
+        jobs_runtime[job_id] = {
+            "running": True,
+            "completed": False,
+            "algorithm": db_job.algorithm,
+            "sites": site_ids,
+            "messages": ["Job created. Waiting for remotes..."]
+        }
+
+        async def run_central(job_id_local: int):
+            # wait for remotes
+            _set_expected_sites(site_ids)
+            await all_sites_connected.wait()
+            jobs_runtime[job_id_local]["messages"].append("All remotes connected. Starting...")
+            imputation_running.set()
+            try:
+                import importlib
+                # Debug: record raw and normalized config before invocation
+                jobs_runtime[job_id_local]["messages"].append(f"DEBUG raw_params={raw_params}")
+                jobs_runtime[job_id_local]["messages"].append(f"DEBUG config_pre_call={config}")
+                # Fallback repair if SIMI missing required keys
+                if algorithm_name == "simi":
+                    missing_keys = [k for k in ("M","mvar","method") if k not in config]
+                    if missing_keys:
+                        # Attempt repair
+                        tgt = raw_params.get("target_column_index")
+                        if tgt is not None and "mvar" not in config:
+                            try:
+                                ti = int(tgt)
+                                config["mvar"] = ti - 1 if ti > 0 else ti
+                            except Exception:
+                                pass
+                        if "method" not in config:
+                            if "is_binary" in raw_params:
+                                config["method"] = "logistic" if raw_params.get("is_binary") else "Gaussian"
+                        if "M" not in config:
+                            config["M"] = db_job.imputation_trials or raw_params.get("M") or 1
+                        jobs_runtime[job_id_local]["messages"].append(f"DEBUG repaired_config={config}")
+                if algorithm_name == "simi":
+                    algorithm_central = importlib.import_module("SIMI.SIMICentral").simi_central
+                elif algorithm_name == "simice":
+                    algorithm_central = importlib.import_module("SIMICE.SIMICECentral").simice_central
+                else:
+                    raise ValueError(f"Unsupported algorithm {algorithm_name}")
+                imputed = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets)
+                jobs_runtime[job_id_local]["messages"].append("Imputation completed.")
+                # Persist results
+                try:
+                    # Normalize list of datasets
+                    if isinstance(imputed, list):
+                        datasets = imputed
+                    else:
+                        datasets = [imputed]
+                    # Create a unique timestamped directory per run
+                    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                    job_dir_name = f"job_{job_id_local}_{ts}"
+                    job_dir = RESULTS_DIR / job_dir_name
+                    job_dir.mkdir(exist_ok=True)
+                    csv_files = []
+                    for i, arr in enumerate(datasets, start=1):
+                        try:
+                            np_arr = np.asarray(arr)
+                        except Exception:
+                            continue
+                        csv_path = job_dir / f"imputed_{i}.csv"
+                        # If includes header row elsewhere we skip; here just raw matrix
+                        np.savetxt(csv_path, np_arr, delimiter=",", fmt="%g")
+                        csv_files.append(csv_path)
+                    # Save metadata
+                    meta = {
+                        "algorithm": algorithm_name,
+                        "config": config,
+                        "num_imputations": len(csv_files),
+                    }
+                    with open(job_dir / "metadata.json", "w") as mf:
+                        json.dump(meta, mf, indent=2)
+                    # Create zip alongside directory with same timestamped base name
+                    zip_path = RESULTS_DIR / f"{job_dir_name}.zip"
+                    with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                        for f in csv_files:
+                            zf.write(f, arcname=f.name)
+                        zf.write(job_dir / "metadata.json", arcname="metadata.json")
+                    jobs_runtime[job_id_local]["result_info"] = {
+                        "imputations": len(csv_files),
+                        "zip_path": str(zip_path),
+                        "run_timestamp": ts,
+                        "job_dir": str(job_dir)
+                    }
+                    jobs_runtime[job_id_local]["zip_path"] = str(zip_path)
+                    jobs_runtime[job_id_local]["job_dir"] = str(job_dir)
+                    jobs_runtime[job_id_local]["run_timestamp"] = ts
+                    # For legacy frontend naming expectation
+                    jobs_runtime[job_id_local]["imputed_dataset_path"] = str(zip_path)
+                    jobs_runtime[job_id_local]["messages"].append(f"Results saved: {zip_path.name} (dir {job_dir_name})")
+                except Exception as save_e:
+                    jobs_runtime[job_id_local]["messages"].append(f"Result save error: {save_e}")
+            except Exception as e:
+                jobs_runtime[job_id_local]["messages"].append(f"Error: {e}")
+                jobs_runtime[job_id_local]["error"] = str(e)
+            finally:
+                jobs_runtime[job_id_local]["completed"] = True
+                jobs_runtime[job_id_local]["running"] = False
+                imputation_running.clear()
+
+        asyncio.create_task(run_central(job_id))
+
+        return templates.TemplateResponse("start_job.html", {
+            "request": request, 
+            "csrf_token": csrf_token, 
+            "jobs": jobs,
+            "active_job_id": job_id,
+            "message": f"Job {job_id} started. Monitoring status..."
+        })
     except Exception as e:
         # Handle errors and return to the same page
         return templates.TemplateResponse("start_job.html", {
@@ -866,7 +781,7 @@ async def gui_jobs_edit_post(request: Request, job_id: int,
             params['target_column_indexes'] = idxs
         if is_binary_list:
             bins = [s.strip().lower() in ('true','1','yes') for s in is_binary_list.split(',') if s.strip()]
-            params['is_binary'] = bins
+            params['is_binary_list'] = bins
         if iteration_before_first_imputation is not None:
             params['iteration_before_first_imputation'] = iteration_before_first_imputation
         if iteration_between_imputations is not None:
@@ -891,146 +806,53 @@ async def gui_jobs_delete_post(request: Request, job_id: int, csrf_token: str = 
     return templates.TemplateResponse("confirm.html", {"request": request, "message": f"Job {job_id} deleted."})
 
 # --------------- Existing API/WebSocket ----------------
-@app.post("/api/jobs/{job_id}/start")
-async def start_job(job_id: int, central_data_file: UploadFile = File(...), db: Session = Depends(get_db), request: Request = None):
-    if request and not is_admin(request):
-        raise HTTPException(status_code=401, detail="Admin authentication required")
-    db_job = services.job_service.get_job(db, job_id=job_id)
-    if not db_job:
+# Removed deprecated /api/jobs/{job_id}/start endpoint (duplicate of GUI POST /gui/jobs/start)
+
+@app.get("/api/jobs/status/{job_id}")
+async def api_job_status(job_id: int):
+    info = jobs_runtime.get(job_id)
+    if not info:
         raise HTTPException(status_code=404, detail="Job not found")
+    return info
 
-    central_data = pd.read_csv(central_data_file.file)
-
-    # Dispatch based on algorithm
-    algorithm_name = (db_job.algorithm or "").upper()
-    try:
-        algorithm_service = AlgorithmServiceFactory.create_service(algorithm_name, manager)
-        asyncio.create_task(algorithm_service.start_job(db_job, central_data))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return {"message": "Job started"}
-
-@app.websocket("/ws/{site_id}")
-async def websocket_endpoint(websocket: WebSocket, site_id: str, token: str = Depends(security.get_token_ws)):
-    # WebSocket remains JWT-guarded for remotes
-    print(f"🔌 WebSocket: New connection from site {site_id}")
-    print(f"🎫 WebSocket: Token validated for site {site_id}")
+@app.get("/api/jobs/{job_id}/download")
+async def api_job_download(job_id: int):
+    info = jobs_runtime.get(job_id)
+    # Primary: use in-memory runtime if available and has existing zip
+    print(f"Download request job_id={job_id} info={info}")
     
-    # Check if there's a running job (for informational purposes)
-    from .services.job_status import JobStatusTracker
-    tracker = JobStatusTracker()
-    running_job_id = tracker.get_first_running_job_id()
-    
-    if running_job_id:
-        print(f"📋 WebSocket: Job {running_job_id} is currently running - allowing site {site_id} to connect")
-    else:
-        print(f"📋 WebSocket: No jobs currently running - site {site_id} will wait for jobs")
-    
-    await manager.connect(websocket, site_id)
-    print(f"✅ WebSocket: Connection established for site {site_id}")
-    
-    try:
-        while True:
-            data = await websocket.receive_text()
-            print(f"📨 WebSocket: Received message from site {site_id}")
-            print(f"💬 WebSocket: Message preview: {data[:200]}{'...' if len(data) > 200 else ''}")
-            
-            # Route message to the appropriate algorithm service
-            await route_websocket_message(site_id, data)
-            print(f"✅ WebSocket: Message routed successfully for site {site_id}")
-            
-    except Exception as e:
-        print(f"💥 WebSocket Error for site {site_id}: {e}")
-        print(f"💥 WebSocket Error details: {type(e).__name__}: {str(e)}")
-    finally:
-        print(f"🔌 WebSocket: Disconnecting site {site_id}")
-        manager.disconnect(websocket, site_id)
-        print(f"❌ WebSocket: Site {site_id} disconnected")
-
-async def route_websocket_message(site_id: str, data: str):
-    """
-    Route WebSocket message to the appropriate algorithm service.
-    """
-    # Focused logging for stats messages
-    if "stats" in data:
-        print(f"📊 Router: STATS from {site_id}")
-    # else:
-    #     print(f"🎯 Router: Processing message from site {site_id}")  # Reduced noise
-    
-    try:
-        # Parse message to determine which algorithm/job it belongs to
-        import json
-        from common.algorithm.job_protocol import parse_message
-        
-        # print(f"📝 Router: Parsing message from site {site_id}")  # Reduced noise
-        # parse_message returns a dictionary, not a tuple
-        message_data = parse_message(data)
-        message_type = message_data.get('type')
-        job_id = message_data.get('job_id')
-        
-        if message_type == "stats":
-            print(f"🔍 Router: STATS message - job_id: {job_id}")
-        # else:
-        #     print(f"🔍 Router: Parsed message - type: {message_type}, job_id: {job_id}")  # Reduced noise
-        
-        if job_id:
-            # Look up the job to determine which algorithm service to use
-            from .db import get_db
-            from . import services
-            
-            print(f"🔍 Router: Looking up job {job_id}")
-            db = next(get_db())
-            try:
-                db_job = services.job_service.get_job(db, job_id=job_id)
+    if info:
+        zip_path = info.get("zip_path")
+        if zip_path and Path(zip_path).exists():
+            logger.info(f"Download (primary) job_id={job_id} path={zip_path}")
+            return FileResponse(zip_path, filename=Path(zip_path).name, media_type="application/zip")
+    # Fallback: search results directory for latest matching zip (survives server restarts)
+    pattern = f"job_{job_id}_*.zip"
+    matches = sorted(RESULTS_DIR.glob(pattern), key=lambda p: p.name, reverse=True)
+    logger.info(f"Download fallback search job_id={job_id} pattern={pattern} matches={[m.name for m in matches]}")
+    if matches:
+        latest = matches[0]
+        # Optionally repopulate runtime cache
+        jobs_runtime.setdefault(job_id, {"completed": True, "running": False})
+        jobs_runtime[job_id]["zip_path"] = str(latest)
+        jobs_runtime[job_id]["imputed_dataset_path"] = str(latest)
+        # Persist to DB legacy field if job exists (best-effort)
+        try:
+            from .services import job_service
+            with next(get_db()) as _db:
+                db_job = job_service.get_job(_db, job_id)
                 if db_job:
-                    # Check if job is completed - reject connection if it is
-                    if db_job.status == "completed":
-                        print(f"🚫 Router: Job {job_id} is already completed, rejecting message from site {site_id}")
-                        # Send a rejection message to the site
-                        rejection_message = {
-                            "type": "error",
-                            "job_id": job_id,
-                            "message": f"Job {job_id} is already completed. No further processing needed."
-                        }
-                        await manager.send_to_site(json.dumps(rejection_message), site_id)
-                        
-                        # Also close the connection with the site
-                        await manager.disconnect_site(site_id)
-                        print(f"🔌 Router: Disconnected site {site_id} for completed job {job_id}")
-                        return
-                        
-                    algorithm_name = (db_job.algorithm or "").upper()
-                    print(f"🎯 Router: Found job {job_id}, algorithm: {algorithm_name}")
-                    
-                    algorithm_service = AlgorithmServiceFactory.create_service(algorithm_name, manager)
-                    print(f"🏭 Router: Created {algorithm_name} service for job {job_id}")
-                    
-                    await algorithm_service.handle_site_message(site_id, data)
-                    print(f"✅ Router: Message handled by {algorithm_name} service")
-                else:
-                    print(f"❌ Router: Job {job_id} not found for message from site {site_id}")
-                    # Send a rejection message to the site
-                    rejection_message = {
-                        "type": "error",
-                        "job_id": job_id,
-                        "message": f"Job {job_id} not found. Connection rejected."
-                    }
-                    await manager.send_to_site(json.dumps(rejection_message), site_id)
-            except Exception as e:
-                print(f"💥 Router: Error routing message from site {site_id}: {e}")
-                import traceback
-                traceback.print_exc()
-            finally:
-                db.close()
-        else:
-            print(f"❌ Router: No job_id in message from site {site_id}: {data[:100]}{'...' if len(data) > 100 else ''}")
-            
-    except Exception as e:
-        print(f"💥 Router: Error parsing message from site {site_id}: {e}")
-        print(f"📝 Router: Problematic message: {data[:200]}{'...' if len(data) > 200 else ''}")
-        import traceback
-        traceback.print_exc()
+                    db_job.imputed_dataset_path = str(latest)
+                    if db_job.status != "completed":
+                        db_job.status = "completed"
+                    _db.add(db_job)
+                    _db.commit()
+        except Exception:
+            pass
+        logger.info(f"Download (fallback) job_id={job_id} path={latest}")
+        return FileResponse(str(latest), filename=latest.name, media_type="application/zip")
+    logger.warning(f"Download 404 job_id={job_id} RESULTS_DIR={RESULTS_DIR} contents={[p.name for p in RESULTS_DIR.glob('*.zip')]}")
+    raise HTTPException(status_code=404, detail="Result archive not found")
 
 @app.get("/health")
 def read_health():
