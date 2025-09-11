@@ -16,7 +16,109 @@ import subprocess
 import pandas as pd
 import numpy as np
 import multiprocessing
-from typing import List, Dict, Any, Union, Optional
+import asyncio
+from fastapi import FastAPI, WebSocket
+from typing import List, Dict, Any, Union, Optional, Set
+
+# Global variables for WebSocket connections
+app = FastAPI()
+remote_websockets: Dict[str, WebSocket] = {}  # Keys are site_id, values are WebSocket connections - presence in this dict indicates connection
+site_locks: Dict[str, asyncio.Lock] = {}
+expected_sites: Optional[Set[str]] = None
+all_sites_connected = asyncio.Event()
+imputation_running = asyncio.Event()
+
+# Helper functions for WebSocket handling
+def set_expected_sites(sites: list):
+    """Set the expected remote sites"""
+    global expected_sites
+    expected_sites = set(sites)
+    print(f"Set expected sites: {expected_sites}", flush=True)
+
+async def maintain_heartbeat(websockets, check_interval=30, ping_message="ping", 
+                           expected_response="pong", timeout=10.0, 
+                           locks=None, active_flag=None):
+    """Maintain heartbeat with connected clients"""
+    while True:
+        await asyncio.sleep(check_interval)
+        # Do not run heartbeat while a job is running to avoid recv/send conflicts
+        if active_flag and active_flag.is_set():
+            # Keep connections idle during active imputation
+            continue
+
+        print(f"Checking heartbeat for {len(websockets)} sites", flush=True)
+        
+        for site_id, websocket in list(websockets.items()):
+            if locks and site_id in locks:
+                # Skip heartbeat if a site is currently processing
+                if locks[site_id].locked():
+                    print(f"Site {site_id} is busy, skipping heartbeat", flush=True)
+                    continue
+                
+                # Acquire lock for heartbeat
+                async with locks[site_id]:
+                    try:
+                        print(f"Sending heartbeat to {site_id}", flush=True)
+                        await websocket.send_text(ping_message)
+                        
+                        # Wait for response with timeout
+                        try:
+                            response = await asyncio.wait_for(websocket.receive_text(), timeout)
+                            if response != expected_response:
+                                print(f"Unexpected heartbeat response from {site_id}: {response}", flush=True)
+                        except asyncio.TimeoutError:
+                            print(f"Heartbeat timeout for site {site_id}", flush=True)
+                            # Remove site from connected sites
+                            if site_id in remote_websockets:
+                                del remote_websockets[site_id]
+                            
+                    except Exception as e:
+                        print(f"Error during heartbeat with {site_id}: {str(e)}", flush=True)
+                        # Remove site from connected sites
+                        if site_id in remote_websockets:
+                            del remote_websockets[site_id]
+
+@app.websocket("/ws/{site_id}")
+async def websocket_endpoint(websocket: WebSocket, site_id: str):
+    # Create a lock for this site if it doesn't exist
+    if site_id not in site_locks:
+        site_locks[site_id] = asyncio.Lock()
+    
+    await websocket.accept()
+    
+    # Store the WebSocket connection (this also indicates the site is connected)
+    remote_websockets[site_id] = websocket
+    
+    print(f"Remote site {site_id} connected", flush=True)
+    
+    # Check if all expected sites are connected
+    if expected_sites and expected_sites.issubset(set(remote_websockets.keys())):
+        all_sites_connected.set()
+        # Start the heartbeat task when all sites are connected
+        heartbeat_task = asyncio.create_task(
+            maintain_heartbeat(
+                remote_websockets,
+                check_interval=30,  # Check every 30 seconds
+                ping_message="ping",
+                expected_response="pong",
+                timeout=10.0,
+                locks=site_locks,  # Pass the locks to prevent conflicts
+                active_flag=imputation_running  # Pass the active operations flag
+            )
+        )
+        print(f"Started heartbeat monitoring for all connected sites", flush=True)
+        print(f"All expected sites are now connected: {', '.join(expected_sites)}", flush=True)
+    
+    try:
+        # Do not read from the websocket here; algorithm-specific code
+        # handles request/response to avoid concurrent recv conflicts.
+        while True:
+            await asyncio.sleep(3600)
+    except Exception as e:
+        print(f"WebSocket connection with {site_id} closed: {str(e)}", flush=True)
+        # Remove the site from connected websockets
+        if site_id in remote_websockets:
+            del remote_websockets[site_id]
 
 # These functions have been combined into start_central_site
 
@@ -87,18 +189,24 @@ async def run_imputation(D, algorithm, config, site_ids, output_path=None):
         List of remote site IDs
     output_path : str, optional
         Output file or directory path, overrides config["output_path"] if provided
+        
+    Note:
+    -----
+    This function passes the remote_websockets dictionary to the algorithm_central function,
+    so that the algorithm can use the existing WebSocket connections instead of creating new ones.
     """
     
     algorithm = algorithm.lower()
     if algorithm == "simi":
-        from SIMI.SIMICentral import all_sites_connected
         from SIMI.SIMICentral import simi_central as algorithm_central
     else:  # algorithm == "simice"
-        from SIMICE.SIMICECentral import all_sites_connected
         from SIMICE.SIMICECentral import simice_central as algorithm_central
     
     # Clear the event first to ensure we're waiting for fresh connections
     all_sites_connected.clear()
+    
+    # Set the imputation running flag
+    imputation_running.set()
     
     # Use output_path from parameter or config
     output_path = output_path or config.get("output_path")
@@ -112,7 +220,8 @@ async def run_imputation(D, algorithm, config, site_ids, output_path=None):
     
     try:
         # Use the algorithm_central function which is assigned based on the algorithm type
-        imputed_data = await algorithm_central(D=D, config=config, site_ids=site_ids)
+        # Pass remote_websockets to the algorithm so it can use the existing WebSocket connections
+        imputed_data = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets)
         # Process and save imputed data - unified approach
         # Prepare output directory and file naming pattern based on algorithm
         if algorithm == "simi":
@@ -173,6 +282,9 @@ async def run_imputation(D, algorithm, config, site_ids, output_path=None):
     except Exception as e:
         print(f"Error in imputation: {str(e)}", flush=True)
         raise
+    finally:
+        # Clear the imputation running flag when done
+        imputation_running.clear()
 
 def start_central_site(algorithm, port, expected_sites, data_file, config, output):
     """Start a central server process (SIMI or SIMICE)
@@ -196,7 +308,7 @@ def start_central_site(algorithm, port, expected_sites, data_file, config, outpu
     
     if algorithm == "simi":
         # Start SIMI central process
-        from SIMI.SIMICentral import app, set_expected_sites, simi_central
+        from SIMI.SIMICentral import simi_central
         import uvicorn
         import asyncio
         import pandas as pd
@@ -225,15 +337,16 @@ def start_central_site(algorithm, port, expected_sites, data_file, config, outpu
                 "method": method,
                 "output_path": output
             }
-            # Pass algorithm as a separate parameter
-            asyncio.create_task(run_imputation(D, algorithm, imputation_config, expected_sites))
+            # Pass algorithm as a separate parameter and output path
+            # Also pass remote_websockets to avoid creating new connections
+            asyncio.create_task(run_imputation(D, algorithm, imputation_config, expected_sites, output))
         
         # Run the server
         uvicorn.run(app, host="0.0.0.0", port=port)
         
     elif algorithm == "simice":
         # Start SIMICE central process
-        from SIMICE.SIMICECentral import app, set_expected_sites, simice_central
+        from SIMICE.SIMICECentral import simice_central
         import uvicorn
         import asyncio
         import pandas as pd
@@ -271,8 +384,8 @@ def start_central_site(algorithm, port, expected_sites, data_file, config, outpu
                 "iter0_val": iter0_val,
                 "output_path": output
             }
-            # Pass algorithm as a separate parameter
-            asyncio.create_task(run_imputation(D, algorithm, imputation_config, expected_sites))
+            # Pass algorithm as a separate parameter and output path
+            asyncio.create_task(run_imputation(D, algorithm, imputation_config, expected_sites, output))
         
         # Run the server
         uvicorn.run(app, host="0.0.0.0", port=port)
@@ -303,33 +416,31 @@ def run_imputation_processes(args):
         )
         remote_processes.append((site_id, remote_proc))
     
+    
     # Prepare output path/directory based on algorithm
     output_path = args.output_dir if args.algorithm.lower() == "simice" and args.output_dir else args.output
     
-    # Create central process using the unified interface
-    central_process = multiprocessing.Process(
-        target=start_central_site,
-        args=(args.algorithm, args.central_port, site_ids, args.central_data, config, output_path)
-    )
-    
-    # Start processes
+    # Start remote processes
     print("Starting remote processes...", flush=True)
     for site_id, proc in remote_processes:
         print(f"Starting {site_id} process...", flush=True)
         proc.start()
+        
     # Give remote sites time to start up
     time.sleep(2)
-    print(f"Starting {args.algorithm} central process...", flush=True)
-    central_process.start()
     
-    # Wait for processes to finish
+    # Start the central site directly instead of using multiprocessing
+    print(f"Starting {args.algorithm} central process...", flush=True)
+    # Call start_central_site directly 
+    start_central_site(args.algorithm, args.central_port, site_ids, args.central_data, config, output_path)
+    
+    # Note: The code below will only execute after the central site completes (when uvicorn exits)
+    # Wait for remote processes to finish
     try:
-        central_process.join()
         for _, proc in remote_processes:
             proc.join()
     except KeyboardInterrupt:
         print("Shutting down...", flush=True)
-        central_process.terminate()
         for _, proc in remote_processes:
             proc.terminate()
 

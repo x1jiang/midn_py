@@ -31,7 +31,6 @@ from Core.transfer import (
     write_string, read_string, write_integer, read_integer,
     WebSocketWrapper, get_wrapped_websocket
 )
-from Core.heartbeat import maintain_heartbeat
 from Core.LS import ImputeLS, SILSNet
 from Core.Logit import ImputeLogit, SILogitNet
 # Set to True to enable detailed debug information
@@ -64,35 +63,8 @@ debug_counters = {
     "imputation": 0
 }
 
-app = FastAPI()
-
-# Keep track of connected clients
-connected_remote_sites = {}
-# Dict to map remote site ID to websocket
-
 # Dictionary to store WebSocket connections for remote sites
 remote_websockets: Dict[str, WebSocket] = {}
-
-def set_expected_sites(site_ids, debug=None):
-    """Set the expected remote sites and optionally enable debug mode
-    
-    Args:
-        site_ids: List of site IDs to expect
-        debug: Enable debug mode (default: None, uses global print_debug_info)
-    """
-    global expected_sites, print_debug_info
-    if debug is not None:
-        print_debug_info = debug
-        
-    expected_sites = set(site_ids)
-    print(f"Set expected sites: {expected_sites}", flush=True)
-    
-    if print_debug_info:
-        print(f"[CENTRAL] Debug mode ENABLED - detailed logging will be shown", flush=True)
-
-# Event to signal all expected remote sites have connected
-all_sites_connected = asyncio.Event()
-expected_sites = set()
 
 # Flag to indicate when imputation is running (to avoid concurrent WebSocket access)
 imputation_running = asyncio.Event()
@@ -100,122 +72,7 @@ imputation_running = asyncio.Event()
 # Dictionary to store locks for each site to ensure sequential communication
 site_locks = {}
 
-@app.websocket("/ws/{site_id}")
-async def websocket_endpoint(websocket: WebSocket, site_id: str):
-    # Create a lock for this site if it doesn't exist
-    if site_id not in site_locks:
-        site_locks[site_id] = asyncio.Lock()
-    
-    await websocket.accept()
-    
-    # Update connection status safely
-    connected_remote_sites[site_id] = True
-    
-    # Store the WebSocket and mark it as pre-accepted
-    remote_websockets[site_id] = websocket
-    
-    print(f"Remote site {site_id} connected", flush=True)
-    
-    # Check if all expected sites are connected
-    if expected_sites and expected_sites.issubset(set(connected_remote_sites.keys())):
-        all_sites_connected.set()
-        # Start the heartbeat task when all sites are connected
-        heartbeat_task = asyncio.create_task(
-            maintain_heartbeat(
-                remote_websockets,
-                check_interval=30,  # Check every 30 seconds
-                ping_message="ping",
-                expected_response="pong",
-                timeout=10.0,
-                locks=site_locks,  # Pass the locks to prevent conflicts
-                active_flag=imputation_running  # Pass the active operations flag
-            )
-        )
-        print(f"Started heartbeat monitoring for all connected sites", flush=True)
-        
-    print(f"All expected sites are now connected: {', '.join(expected_sites)}", flush=True)
-    
-    # HIGHLIGHT: Keep this endpoint alive for the entire session; do not perform
-    #            any socket I/O here (the algorithm + heartbeat own the socket).
-    try:
-        while True:                                 # HIGHLIGHT
-            while imputation_running.is_set():      # HIGHLIGHT
-                await asyncio.sleep(30)             # HIGHLIGHT
-            await asyncio.sleep(1)                  # HIGHLIGHT
-    except Exception as e:                          # HIGHLIGHT
-        print(f"Error in WebSocket connection with {site_id}: {type(e).__name__}: {str(e)}", flush=True)  # HIGHLIGHT
-    finally:
-        # HIGHLIGHT: Only clean up on actual endpoint exit (real disconnect).
-        if site_id in connected_remote_sites:       # HIGHLIGHT
-            del connected_remote_sites[site_id]     # HIGHLIGHT
-        if site_id in remote_websockets:            # HIGHLIGHT
-            del remote_websockets[site_id]          # HIGHLIGHT
-        if (site_id in expected_sites) and (not imputation_running.is_set()):  # HIGHLIGHT
-            all_sites_connected.clear()             # HIGHLIGHT
-            print(f"Cleared all_sites_connected flag since {site_id} was expected and disconnected", flush=True)  # HIGHLIGHT
-        print(f"Remote site {site_id} disconnected", flush=True)  # HIGHLIGHT
-            
-    # During imputation, we don't need to do health checks
-    # Just wait for the connection to close
-    if imputation_running.is_set():
-        try:
-            # During imputation, we shouldn't try to receive data in this task
-            # Instead, just keep the connection alive but don't interfere with data exchange
-            while True:
-                await asyncio.sleep(30)  # Just sleep without trying to use the socket
-        except Exception:
-            # Any error means the connection is likely dead
-            pass
-    else:
-        # Normal health check loop when not imputing
-        try:
-            # Keep track of consecutive failures
-            failures = 0
-            max_failures = 3  # Max allowed consecutive failures before disconnection
-            
-            while failures < max_failures:
-                try:
-                    # Check if imputation has started
-                    if imputation_running.is_set():
-                        # If imputation started, stop health checks
-                        print(f"Imputation running, stopping health checks for {site_id}", flush=True)
-                        break
-                    
-                    # Send ping using our write_string function with the wrapper
-                    wrapped_ws = get_wrapped_websocket(websocket)
-                    await write_string("ping", wrapped_ws)
-                    # Wait for pong with timeout
-                    message = await asyncio.wait_for(read_string(wrapped_ws), timeout=5.0)
-                    
-                    if message == "pong":
-                        # Reset failure counter on successful ping-pong
-                        failures = 0
-                    else:
-                        print(f"Unexpected message from {site_id}: {message}", flush=True)
-                        failures += 1
-                        
-                except (asyncio.TimeoutError, WebSocketDisconnect, Exception) as e:
-                    print(f"Ping-pong with {site_id} failed: {type(e).__name__}", flush=True)
-                    failures += 1
-                    
-                # Sleep between pings
-                await asyncio.sleep(1)
-        except Exception as e:
-            print(f"Error in WebSocket connection with {site_id}: {type(e).__name__}: {str(e)}", flush=True)
-    
-    # Connection closed or imputation started, clean up
-    if site_id in connected_remote_sites:
-        del connected_remote_sites[site_id]
-    if site_id in remote_websockets:
-        del remote_websockets[site_id]
-    
-    # Clear the all_sites_connected event if this site was expected
-    # and we no longer have all expected sites connected
-    if site_id in expected_sites and not imputation_running.is_set():
-        all_sites_connected.clear()
-    print(f"Cleared all_sites_connected flag since {site_id} was expected and disconnected", flush=True)
-    
-    print(f"Remote site {site_id} disconnected or imputation started", flush=True)
+# No local WebSocket endpoint - we use the WebSockets provided from run_imputation.py
 
 # Helper functions to facilitate network communication for SIMICE
 async def initialize_remote_sites(mvar_list):
@@ -233,7 +90,7 @@ async def initialize_remote_sites(mvar_list):
     for site_id, websocket in site_items:
         try:
             async with site_locks[site_id]:
-                # Mark WebSocket as pre-accepted since we accepted it in the websocket_endpoint
+                # Mark WebSocket as pre-accepted since it comes from run_imputation.py
                 wrapped_ws = get_wrapped_websocket(websocket, pre_accepted=True)
                 try:
                     # Send initialization commands
@@ -245,8 +102,6 @@ async def initialize_remote_sites(mvar_list):
                     # Remove the site from our active connections
                     if site_id in remote_websockets:
                         del remote_websockets[site_id]
-                    if site_id in connected_remote_sites:
-                        del connected_remote_sites[site_id]
         except Exception as e:
             print(f"Error acquiring lock for {site_id}: {type(e).__name__}: {str(e)}", flush=True)
             
@@ -275,7 +130,7 @@ async def finalize_remote_sites(site_ids):
             except Exception as e:
                 print(f"[CENTRAL] Error sending End message to {site_id}: {type(e).__name__}: {str(e)}", flush=True)
 
-async def simice_central(D, config=None, site_ids=None, debug=True):
+async def simice_central(D, config=None, site_ids=None, websockets=None, debug=True):
     """
     Implement the SIMICE central algorithm with unified interface
     
@@ -292,6 +147,8 @@ async def simice_central(D, config=None, site_ids=None, debug=True):
         - iter0_val: Number of imputation iterations before the first extracted imputed data
     site_ids : List[str]
         List of remote site IDs
+    websockets : Dict[str, WebSocket]
+        Dictionary of WebSocket connections to remote sites
     debug : bool
         Enable debug mode
     
@@ -319,13 +176,20 @@ async def simice_central(D, config=None, site_ids=None, debug=True):
     global print_debug_info
     if debug is not None:
         print_debug_info = debug
-    # ▶ NEW: declare who we expect, and wait until they're all connected
-    set_expected_sites(site_ids, debug=debug)
-    try:
-        await asyncio.wait_for(all_sites_connected.wait(), timeout=60)
-    except asyncio.TimeoutError:
+    # Use provided websockets if available
+    global remote_websockets
+    if websockets is not None:
+        remote_websockets = websockets
+        print(f"Using provided WebSocket connections for {len(remote_websockets)} sites", flush=True)
+        
+        # Validate that all expected sites are in the provided websockets
         missing = set(site_ids) - set(remote_websockets.keys())
-        raise RuntimeError(f"Not all remote sites connected within timeout. Missing: {sorted(missing)}")
+        if missing:
+            raise RuntimeError(f"Not all required remote sites are connected. Missing: {sorted(missing)}")
+    else:
+        # No WebSockets provided - this should never happen in the new architecture
+        # as we expect WebSockets to be provided by run_imputation.py
+        raise RuntimeError("No WebSockets provided. SIMICE now requires WebSockets to be passed from run_imputation.py.")
         
         
     # Reset debug counters

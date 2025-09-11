@@ -27,24 +27,9 @@ from Core.transfer import (
     WebSocketWrapper, get_wrapped_websocket
 )
 
-app = FastAPI()
-
-# Keep track of connected clients
-connected_remote_sites = {}
-# Dict to map remote site ID to websocket
-
 # Function to set expected remote sites
 # Dictionary to store WebSocket connections for remote sites
 remote_websockets: Dict[str, WebSocket] = {}
-
-def set_expected_sites(site_ids):
-    global expected_sites
-    expected_sites = set(site_ids)
-    print(f"Set expected sites: {expected_sites}")
-
-# Event to signal all expected remote sites have connected
-all_sites_connected = asyncio.Event()
-expected_sites = set()
 
 # Flag to indicate when imputation is running (to avoid concurrent WebSocket access)
 imputation_running = asyncio.Event()
@@ -52,45 +37,7 @@ imputation_running = asyncio.Event()
 # Dictionary to store locks for each site to ensure sequential communication
 site_locks = {}
 
-@app.websocket("/ws/{site_id}")
-async def websocket_endpoint(websocket: WebSocket, site_id: str):
-    # Create a lock for this site if it doesn't exist
-    if site_id not in site_locks:
-        site_locks[site_id] = asyncio.Lock()
-    
-    # Wrap the WebSocket with our JSON-only wrapper
-    wrapped_ws = get_wrapped_websocket(websocket)
-    
-    # Update connection status safely
-    connected_remote_sites[site_id] = True
-    remote_websockets[site_id] = wrapped_ws
-    
-    print(f"Remote site {site_id} connected")
-    
-    # Check if all expected sites are connected
-    if expected_sites and expected_sites.issubset(set(connected_remote_sites.keys())):
-        all_sites_connected.set()
-        print("All expected sites connected!")
-    
-    try:
-        # Keep connection alive until closed
-        while True:
-            # Heartbeats handled by the WebSocketWrapper
-            await asyncio.sleep(5)  # Simple keep-alive loop
-            
-    except WebSocketDisconnect:
-        print(f"Remote site {site_id} disconnected")
-    except Exception as e:
-        print(f"Error with remote site {site_id}: {str(e)}")
-    finally:
-        # Clean up connection status
-        if site_id in connected_remote_sites:
-            del connected_remote_sites[site_id]
-        if site_id in remote_websockets:
-            del remote_websockets[site_id]
-        print(f"Remote site {site_id} connection closed")
-
-async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] = None):
+async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] = None, websockets: Dict[str, WebSocket] = None):
     """
     Python implementation of SIMICentral with unified interface
     
@@ -106,6 +53,8 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
         - Other optional parameters
     site_ids : List[str]
         List of remote site IDs
+    websockets : Dict[str, WebSocket]
+        Dictionary of WebSocket connections to remote sites
     
     R equivalent:
     SIMICentral = function(D,M,mvar,method,hosts,ports,cent_ports)
@@ -162,6 +111,12 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
     
     if M is None or mvar is None or method is None:
         raise ValueError("Missing required parameters in config: M, mvar, or method")
+    # Use provided websockets if available
+    global remote_websockets
+    if websockets is not None:
+        remote_websockets = websockets
+        print(f"Using provided WebSocket connections for {len(remote_websockets)} sites")
+    
     # Create locks for each site if they don't exist
     for site_id in site_ids:
         if site_id not in site_locks:
@@ -172,9 +127,8 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
     print("Imputation started, flag set")
     
     try:
-        # Wait for all expected remote sites to connect
-        await all_sites_connected.wait()
-        print("All sites connected, beginning synchronous communication")
+        # Use the existing connections, no need to wait for new connections
+        print("Using existing WebSocket connections, beginning communication")
         
         n, p_plus_1 = D.shape
         p = p_plus_1 - 1
@@ -186,7 +140,7 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
         y = D[~miss, mvar]
         
         if method == "Gaussian":
-            SI = await si_central_ls(X, y, site_ids)
+            SI = await si_central_ls(X, y, site_ids, websockets=websockets)
             # Safely compute Cholesky decomposition of vcov
             try:
                 # Check for NaN/Inf values
@@ -205,7 +159,7 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
                 vcov_reg = SI["vcov"] + np.eye(SI["vcov"].shape[0]) * reg
                 cvcov = cholesky(vcov_reg, lower=True)
         elif method == "logistic":
-            SI = await si_central_logit(X, y, site_ids)
+            SI = await si_central_logit(X, y, site_ids, websockets=websockets)
             # Safely compute Cholesky decomposition of vcov
             try:
                 # Check for NaN/Inf values
@@ -258,7 +212,7 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
         imputation_running.clear()
         print("Imputation completed, flag cleared")
 
-async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: float = 1e-3):
+async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: float = 1e-3, websockets: Dict[str, WebSocket] = None):
     """
     Python implementation of SICentralLS using JSON-only WebSocket communication
     
@@ -306,12 +260,16 @@ async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: 
     Xy = np.dot(X.T, y)
     yy = np.sum(y**2)
     
+    # Use provided websockets if available
+    global remote_websockets
+    ws_dict = websockets if websockets is not None else remote_websockets
+    
     # Send method to all remote sites and gather their contributions
     # Process one site at a time for a more synchronous pattern
     for site_id in site_ids:
         # Acquire lock for this site to ensure sequential access
         async with site_locks[site_id]:
-            ws = remote_websockets[site_id]
+            ws = ws_dict[site_id]
             
             # Send method as a string
             await write_string("Gaussian", ws)
@@ -333,40 +291,6 @@ async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: 
             yy += remote_yy[0]
             
             print(f"Received data from site {site_id}: n={int(remote_n[0])}, XX shape={remote_XX.shape}")
-            try:
-                print(f"Processing Gaussian data from site {site_id}")
-                websocket = remote_websockets.get(site_id)
-                if not websocket:
-                    print(f"Warning: WebSocket for site {site_id} not found, skipping")
-                    continue
-                
-                # Use the wrapper for consistent interface
-                # We need a try-except here in case wrapping fails
-                try:
-                    wrapped_websocket = get_wrapped_websocket(websocket)
-                except Exception as e:
-                    print(f"Error creating wrapper for {site_id}: {str(e)}")
-                    continue
-                
-                # Send method - clear request
-                await write_string("Gaussian", wrapped_websocket)
-                
-                # Get responses one by one
-                n_remote = await read_vector(wrapped_websocket)
-                n += n_remote[0]
-                
-                XX_remote = await read_matrix(wrapped_websocket)
-                XX += XX_remote
-                
-                Xy_remote = await read_vector(wrapped_websocket)
-                Xy += Xy_remote
-                
-                yy_remote = await read_vector(wrapped_websocket)
-                yy += yy_remote[0]
-                
-                print(f"Finished processing data from site {site_id}")
-            except Exception as e:
-                print(f"Error processing site {site_id}: {type(e).__name__}: {str(e)}")
     
     # Calculate results
     SI = {}
@@ -440,7 +364,7 @@ async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: 
     
     return SI
 
-async def si_central_logit(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: float = 1e-3, maxiter: int = 100):
+async def si_central_logit(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: float = 1e-3, maxiter: int = 100, websockets: Dict[str, WebSocket] = None):
     """
     Python implementation of SICentralLogit using JSON-only WebSocket communication
     
@@ -698,16 +622,11 @@ async def si_central_logit(X: np.ndarray, y: np.ndarray, site_ids: List[str], la
         
     return SI
     
-# Set up the expected remote sites
-def set_expected_sites(sites: List[str]):
-    global expected_sites
-    expected_sites = set(sites)
-    all_sites_connected.clear()  # Clear any existing event
-
-# Run the FastAPI app
+# This function is now deprecated - we use the central WebSocket handling in run_imputation.py
+# The FastAPI app has been removed since it's now managed externally
 def run_central_server(host="0.0.0.0", port=8000):
-    import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    print("Warning: This function is deprecated. The server should be run through run_imputation.py")
+    raise NotImplementedError("Direct server running is no longer supported. Use run_imputation.py instead.")
 
 if __name__ == "__main__":
-    run_central_server()
+    print("This module should not be run directly. Use run_imputation.py instead.")

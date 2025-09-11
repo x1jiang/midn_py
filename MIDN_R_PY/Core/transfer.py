@@ -19,7 +19,8 @@ class WebSocketWrapper:
     Consistent interface for FastAPI WebSocket (server) and websockets (client).
     HIGHLIGHT: Only TEXT frames are used; all data is JSON-encoded strings.
     """
-    def __init__(self, websocket, pre_accepted=False):
+    # set pre_accepted=True if the FastAPI WebSocket has already been accepted externally
+    def __init__(self, websocket, pre_accepted=True):
         self.websocket = websocket
         self.ws_type = self._determine_websocket_type(websocket)
         self.is_active = True
@@ -72,7 +73,7 @@ class WebSocketWrapper:
             self.is_active = False
 
 
-def get_wrapped_websocket(websocket, pre_accepted=False):
+def get_wrapped_websocket(websocket, pre_accepted=True):
     """HIGHLIGHT: Factory; JSON-only wrapper.
     
     Args:
