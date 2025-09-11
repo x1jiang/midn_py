@@ -1,6 +1,9 @@
 # Byte-compiled / optimized / DLL files
 central/app/static/results/*
 !central/app/static/results/.gitkeep
+remote_runtime/jobs/*
+!remote_runtime/jobs/.gitkeep
+
 central.db
 __pycache__/
 *.py[cod]
