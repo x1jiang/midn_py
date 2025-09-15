@@ -52,8 +52,12 @@
           <label>Target Column Indexes (comma-separated 1-based):<br>
             <input type="text" name="target_column_indexes" value="{{ (job.parameters.get('target_column_indexes') or []) | join(',') }}">
           </label><br>
+          {% set _bin_list = job.parameters.get('is_binary_list') if job.parameters.get('is_binary_list') is not none else job.parameters.get('is_binary') %}
+          {% if _bin_list is string %}
+            {% set _bin_list = [_bin_list] %}
+          {% endif %}
           <label for="is_binary_list">Is Binary per column (comma-separated true/false):<br>
-            <input type="text" name="is_binary_list" id="is_binary_list" value="{{ (job.parameters.get('is_binary') or []) | map('string') | join(',') }}">
+            <input type="text" name="is_binary_list" id="is_binary_list" value="{% if _bin_list %}{{ _bin_list | map('lower') | join(',') if _bin_list and _bin_list[0] is string else _bin_list | map('string') | map('lower') | join(',') }}{% endif %}">
           </label><br>
           <label>Iter before first:<br>
             <input type="number" name="iteration_before_first_imputation" min="0" value="{{ job.parameters.get('iteration_before_first_imputation') }}">

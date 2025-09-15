@@ -5,14 +5,15 @@
       "CENTRAL_URL": "ws://127.0.0.1:8000",
       "HTTP_URL": "http://127.0.0.1:8000",
       "SITE_ID": "224bdbc5",
-      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMjRiZGJjNSIsImV4cCI6MTc1NzY4Nzg3OX0.vdW5NDgBBKTvRk945Ixg19P34X6D_-AQtBNcEsdycHs"
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMjRiZGJjNSIsImV4cCI6MTc2MDU0MDU5OX0.PALYi7ATTVehI6tyDxWTklgqC8wJSxIBMOROOOk2T3k"
+      
     },
     {
       "name": "remote2",
       "CENTRAL_URL": "ws://127.0.0.1:8000",
       "HTTP_URL": "http://127.0.0.1:8000",
       "SITE_ID": "863a2efd",
-      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4NjNhMmVmZCIsImV4cCI6MTc1NzY4Nzg4NH0.Uxv-62JIpgr95a9WKL0TU3wxvce_Em42zjUU7qWizfs"
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4NjNhMmVmZCIsImV4cCI6MTc2MDU0MDYwNn0.peuZVOz-WQniHwLIjv4gMWD4n8VX7Vh9nR33xgr37ic"
     }
   ]
 }

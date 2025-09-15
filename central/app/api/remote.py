@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Dict
+import json
 
 from ..db import get_db
 from ..core.security import get_current_user
@@ -40,6 +41,9 @@ async def list_site_jobs(site_id: str, user: str = Depends(get_current_user), db
     result = []
     for j in jobs:
         try:
+            print("*"*40)
+            serializable_attrs = {k: v for k, v in vars(j).items() if not k.startswith('_')}
+            print(json.dumps(serializable_attrs, indent=2))
             parts = j.participants or []
             if site_id in parts:
                 result.append({

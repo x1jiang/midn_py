@@ -321,14 +321,15 @@ async def gui_jobs_create_post(
             "target_column_indexes": idxs,
             "is_binary_list": bins,
             "iteration_before_first_imputation": iteration_before_first_imputation,
-            "iteration_between_imputations": iteration_between_imputations
+            "iteration_between_imputations": iteration_between_imputations,
+            "imputation_trials": imputation_trials
         }
         # For multi-feature, missing_spec can mirror params specific fields
         missing_spec = {
             "target_column_indexes": idxs,
             "is_binary_list": bins,
-            "iteration_before_first_imputation": iteration_before_first_imputation,
-            "iteration_between_imputations": iteration_between_imputations
+            #"iteration_before_first_imputation": iteration_before_first_imputation,
+            #"iteration_between_imputations": iteration_between_imputations
         }
     else:
         return HTMLResponse("Unsupported algorithm", status_code=400)
@@ -759,36 +760,50 @@ async def gui_jobs_edit_post(request: Request, job_id: int,
     if not updated:
         return templates.TemplateResponse("confirm.html", {"request": request, "message": "Job not found."})
 
-    # Update parameters based on algorithm
+    # Build parameters and missing_spec based on algorithm (mirror creation logic)
     algo = (job.algorithm or '').upper()
-    # Make a copy of parameters to modify
-    params = dict(updated.parameters or {})
-    
+
     if algo == 'SIMI':
         try:
             idx = int(target_column_index) if target_column_index not in (None, "") else None
         except ValueError:
             return HTMLResponse("Target column index must be an integer", status_code=400)
-        if idx is not None:
-            params['target_column_index'] = idx
-        params['is_binary'] = bool(is_binary)
+        if idx is None or idx < 1:
+            return HTMLResponse("Target column index is required (1-based)", status_code=400)
+        params = {"target_column_index": idx, "is_binary": is_binary}
+        missing_spec = {"target_column_index": idx, "": is_binary}
     elif algo == 'SIMICE':
-        if target_column_indexes:
-            try:
-                idxs = [int(x.strip()) for x in target_column_indexes.split(',') if x.strip()]
-            except ValueError:
-                return HTMLResponse("Invalid indexes list", status_code=400)
-            params['target_column_indexes'] = idxs
-        if is_binary_list:
+        try:
+            idxs = [int(x.strip()) for x in target_column_indexes.split(',') if x.strip()]
             bins = [s.strip().lower() in ('true','1','yes') for s in is_binary_list.split(',') if s.strip()]
-            params['is_binary_list'] = bins
-        if iteration_before_first_imputation is not None:
-            params['iteration_before_first_imputation'] = iteration_before_first_imputation
-        if iteration_between_imputations is not None:
-            params['iteration_between_imputations'] = iteration_between_imputations
-    
-    # Reassign the entire dictionary to trigger SQLAlchemy change detection
+        except ValueError:
+            return HTMLResponse("Invalid indexes or boolean list", status_code=400)
+        if not idxs or len(bins) != len(idxs):
+            return HTMLResponse("Indexes and is_binary list must be same length and non-empty", status_code=400)
+        if iteration_before_first_imputation is None or iteration_between_imputations is None:
+            return HTMLResponse("Iteration fields are required for SIMICE", status_code=400)
+        params = {
+            "target_column_indexes": idxs,
+            "is_binary_list": bins,
+            "iteration_before_first_imputation": iteration_before_first_imputation,
+            "iteration_between_imputations": iteration_between_imputations,
+            # Keep parity with creation: include imputation_trials inside params (also stored as column)
+            "imputation_trials": (imputation_trials if imputation_trials is not None else updated.imputation_trials)
+        }
+        missing_spec = {
+            "target_column_indexes": idxs,
+            "is_binary_list": bins,
+        }
+    else:
+        return HTMLResponse("Unsupported algorithm", status_code=400)
+
+    # Assign updated fields
     updated.parameters = params
+    updated.missing_spec = missing_spec
+    updated.iteration_before_first_imputation = iteration_before_first_imputation
+    updated.iteration_between_imputations = iteration_between_imputations
+    updated.imputation_trials = imputation_trials  
+    
     db.add(updated)
     db.commit()
     db.refresh(updated)
