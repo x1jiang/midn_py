@@ -7,10 +7,7 @@ class JobBase(BaseModel):
     algorithm: str  # algorithm name, e.g., "SIMI"
     parameters: Dict  # validated against algorithms/<algorithm>/params.json
     participants: List[str]
-    missing_spec: Optional[Dict] = None
-    iteration_before_first_imputation: Optional[int] = None
-    iteration_between_imputations: Optional[int] = None
-    imputation_trials: int = 10  # number of imputation trials (all algorithms)
+    # legacy metadata removed (missing_spec, iteration*, imputation_trials)
 
 class JobCreate(JobBase):
     pass

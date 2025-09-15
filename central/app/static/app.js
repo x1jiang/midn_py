@@ -715,20 +715,30 @@ document.addEventListener('DOMContentLoaded', () => {
         // Add header for algorithm parameters section
         html += `<tr><td colspan="2"><h4 id="algorithm-params-heading">${job.algorithm} Parameters:</h4></td></tr>`;
         
-        // Add parameters in the order we specified in the server code
-        for (const [key, value] of Object.entries(job.parameters)) {
-          const formattedKey = key
+        // Determine desired order (server-provided param_order or insertion order fallback)
+        const orderedKeys = Array.isArray(job.param_order) && job.param_order.length
+          ? job.param_order
+          : Object.keys(job.parameters);
+        orderedKeys.forEach(key => {
+          if (!(key in job.parameters)) return; // safety
+          const value = job.parameters[key];
+          // Friendly label adjustments
+          let labelKey = key;
+          if (job.algorithm && job.algorithm.toUpperCase() === 'SIMICE') {
+            if (key === 'is_binary' || key === 'is_binary_list') {
+              labelKey = 'is_binary'; // unify display
+            }
+          }
+          const formattedKey = labelKey
             .replace(/_/g, ' ')
             .replace(/\b\w/g, c => c.toUpperCase());
-          const paramId = `param-${key.replace(/\s+/g, '-').toLowerCase()}`;
-            
+          const paramId = `param-${labelKey.replace(/\s+/g, '-').toLowerCase()}`;
           html += `
             <tr>
               <th scope="row" id="${paramId}">${formattedKey}:</th>
               <td aria-labelledby="${paramId}">${formatValue(value)}</td>
-            </tr>
-          `;
-        }
+            </tr>`;
+        });
       }
       
       // Add additional job settings
@@ -848,8 +858,17 @@ document.addEventListener('DOMContentLoaded', () => {
       simiIndex.value = simiHeader.value || '';
     }
     if (simiceHeaders && simiceIndexes) {
+      // Auto-select first option if none selected to give a starting value
+      if (simiceHeaders.selectedOptions.length === 0 && simiceHeaders.options.length > 0) {
+        simiceHeaders.options[0].selected = true;
+      }
       const sel = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
       simiceIndexes.value = sel.join(',');
+      // Also update textarea param if present
+      const paramMulti = document.getElementById('target_column_indexes');
+      if (paramMulti) {
+        paramMulti.value = sel.join(',');
+      }
     }
   }
 
@@ -877,10 +896,48 @@ document.addEventListener('DOMContentLoaded', () => {
     const syncSimice = () => {
       const vals = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
       simiceIndexes.value = vals.join(',');
+  const paramMulti = document.getElementById('target_column_indexes');
+  if (paramMulti) paramMulti.value = vals.join(',');
     };
     simiceHeaders.addEventListener('change', syncSimice);
     simiceHeaders.addEventListener('input', syncSimice);
     simiceHeaders.addEventListener('click', syncSimice);
+
+    // Simple click toggle (no ctrl/cmd required) for multi-select
+    simiceHeaders.addEventListener('mousedown', (e) => {
+      if (e.target && e.target.tagName === 'OPTION') {
+        e.preventDefault(); // prevent default selection behavior
+        const option = e.target;
+        option.selected = !option.selected;
+        // Manually dispatch change event to trigger sync
+        simiceHeaders.dispatchEvent(new Event('change'));
+      }
+    });
+  }
+
+  // Unified sync that writes into whichever param field exists after schema render
+  function unifiedHeaderSync(){
+    const algoSelect = document.getElementById('algo-select');
+    const current = (algoSelect?.value || '').toUpperCase();
+    const targetSingle = document.getElementById('target_column_index');
+    const targetMulti = document.getElementById('target_column_indexes');
+    if (current === 'SIMICE') {
+      if (simiceHeaders && targetMulti) {
+        const vals = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
+        targetMulti.value = vals.join(',');
+      }
+    } else { // default single
+      if (simiHeader && targetSingle) {
+        targetSingle.value = simiHeader.value || '';
+      }
+    }
+  }
+
+  if (simiHeader) {
+    ['change','input','click'].forEach(ev=>simiHeader.addEventListener(ev, unifiedHeaderSync));
+  }
+  if (simiceHeaders) {
+    ['change','input','click'].forEach(ev=>simiceHeaders.addEventListener(ev, unifiedHeaderSync));
   }
 
   const syncSimiceIndexes = () => {

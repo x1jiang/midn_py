@@ -52,10 +52,6 @@ async def list_site_jobs(site_id: str, user: str = Depends(get_current_user), db
                     "algorithm": j.algorithm,
                     "parameters": j.parameters,
                     "status": j.status,
-                    "missing_spec": j.missing_spec,
-                    "iteration_before_first_imputation": j.iteration_before_first_imputation,
-                    "iteration_between_imputations": j.iteration_between_imputations,
-                    "imputation_trials": j.imputation_trials,
                 })
         except Exception as e:
             print(f"Error serializing job {j.id}: {str(e)}")

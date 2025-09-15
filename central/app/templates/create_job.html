@@ -5,6 +5,12 @@
   <meta name="csrf-token" content="{{ csrf_token | default('') }}">
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
+  <style>
+    .param-field textarea, .param-field input[type='number'], .param-field input[type='text'], .param-field select { max-width:260px; width:260px; }
+    .param-field textarea { resize: vertical; }
+    .param-field button.config-inline { display:block; margin-top:6px; }
+    .param-hint { font-size:0.7em; color:#666; margin-top:4px; }
+  </style>
 </head>
 <body>
   <header>
@@ -19,7 +25,7 @@
   <main class="container">
     <div class="card">
       <h1>Create Job</h1>
-      <form method="post">
+      <form method="post" novalidate>
         <label>Algorithm:<br>
           <select name="algorithm" id="algo-select" required>
             {% for a in algorithms %}
@@ -42,62 +48,311 @@
           <p>Upload a CSV to load headers, then pick the target column(s). We will store 1-based indices.</p>
           <label>CSV with headers:<br><input type="file" id="header-file" accept=".csv"></label><br>
           <!-- Header selects populated by JS -->
-          <div class="section-simi">
-            <label>Pick target header (SIMI):<br>
+          <div id="header-picker-wrapper">
+            <label id="header-picker-label">Pick target header:<br>
               <select id="simi-header-select"></select>
             </label>
-          </div>
-          <div class="section-simice" style="display:none">
-            <label>Pick target headers (SIMICE):<br>
+            <label id="header-picker-label-multi" style="display:none">Pick target headers:<br>
               <select id="simice-headers-select" multiple size="8"></select>
             </label>
           </div>
         </div>
 
-        <!-- SIMI section -->
-        <div class="section-simi">
-          <h3>SIMI Parameters</h3>
-          <label>Target Column Index (1-based):<br><input type="number" name="target_column_index" id="target_column_index" min="1"></label><br>
-          <div class="checkbox-container">
-            <input type="checkbox" name="is_binary" id="is_binary" value="true">
-            <label for="is_binary">Binary Target</label>
-          </div><br>
-        </div>
-
-        <!-- SIMICE section -->
-        <div class="section-simice" style="display:none">
-          <h3>SIMICE Parameters</h3>
-          <label>Target Column Indexes (comma-separated 1-based):<br><input type="text" name="target_column_indexes" id="target_column_indexes" placeholder="e.g., 2,5,7"></label><br>
-          <div class="checkbox-container">
-            <label>Is Binary per column:</label>
-            <button type="button" class="btn-secondary" id="open-binary-modal">Set per-column types</button>
+  <div id="dynamic-params"></div>
+  <p style="font-size:0.85em;color:#555">Parameters generated from algorithm config schema.</p>
+        <!-- Binary configuration modal for multi-column algorithms -->
+        <div id="binary-config-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.45);align-items:center;justify-content:center;z-index:2000;">
+          <div style="background:#fff;padding:18px 22px;border-radius:6px;max-width:520px;width:90%;max-height:75vh;overflow:auto;box-shadow:0 4px 18px rgba(0,0,0,0.3);">
+            <h3 style="margin-top:0">Configure Binary Flags</h3>
+            <p style="font-size:0.85em;color:#555" id="binary-config-help">Mark each selected target column as binary (True) or continuous (False).</p>
+            <!-- Replaced nested form with div to avoid closing the outer form -->
+            <div id="binary-config-form" role="form" aria-label="Binary configuration">
+              <div id="binary-config-list" style="display:grid;grid-template-columns:1fr auto;gap:6px 12px;margin-bottom:14px;"></div>
+              <div style="text-align:right;margin-top:10px;">
+                <button type="button" id="binary-config-cancel" style="margin-right:8px;">Cancel</button>
+                <button type="button" id="binary-config-save" class="btn-primary">Update</button>
+              </div>
+            </div>
           </div>
-          <input type="text" name="is_binary_list" id="is_binary_list" placeholder="true,false,true" readonly>
-          <br>
-          <label>Iter before first:<br><input type="number" name="iteration_before_first_imputation" min="0" value="0"></label><br>
-          <label>Iter between:<br><input type="number" name="iteration_between_imputations" min="0" value="0"></label><br>
         </div>
-
-        <label>Number of Imputation Trials:<br><input type="number" name="imputation_trials" value="10" min="1"></label><br>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit">Create</button>
       </form>
     </div>
   </main>
 
-  <!-- Binary modal -->
-  <div id="binary-modal" class="modal" style="display:none">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3>Is Binary per selected column</h3>
-        <button type="button" class="close" id="binary-modal-close">×</button>
-      </div>
-      <div class="modal-body" id="binary-list"></div>
-      <div class="modal-footer">
-        <button type="button" class="btn-secondary" id="binary-modal-cancel">Cancel</button>
-        <button type="button" class="btn-primary" id="binary-modal-save">Save</button>
-      </div>
-    </div>
-  </div>
+  <script id="alg-schemas" type="application/json">{{ alg_schemas | tojson | safe }}</script>
+  <script>
+    const ALG_SCHEMAS = JSON.parse(document.getElementById('alg-schemas').textContent);
+    function renderParams(algo){
+      const container = document.getElementById('dynamic-params');
+      container.innerHTML='';
+      const schema = ALG_SCHEMAS[algo];
+      if(!schema){ container.innerHTML='<p>No schema found.</p>'; return; }
+      // Toggle header picker labeling based on multi_column flag
+      const multi = !!schema.multi_column;
+      const singleLabel = document.getElementById('header-picker-label');
+      const multiLabel = document.getElementById('header-picker-label-multi');
+      if(singleLabel && multiLabel){
+        if(multi){
+          singleLabel.style.display='none';
+          multiLabel.style.display='block';
+        } else {
+          singleLabel.style.display='block';
+          multiLabel.style.display='none';
+        }
+      }
+      const props = schema.properties || {};
+      const required = new Set(schema.required||[]);
+      const frag = document.createDocumentFragment();
+      const h = document.createElement('h3');
+      h.textContent = algo + ' Parameters';
+      frag.appendChild(h);
+      // Determine ordered keys using ui:order if provided
+      let entries = Object.entries(props);
+      const order = Array.isArray(schema['ui:order']) ? schema['ui:order'] : [];
+      if(order.length){
+        const orderIndex = new Map(order.map((k,i)=>[k,i]));
+        entries.sort((a,b)=>{
+          const ai = orderIndex.has(a[0])?orderIndex.get(a[0]):Number.MAX_SAFE_INTEGER;
+          const bi = orderIndex.has(b[0])?orderIndex.get(b[0]):Number.MAX_SAFE_INTEGER;
+          return ai-bi || a[0].localeCompare(b[0]);
+        });
+      }
+      entries.forEach(([key, def])=>{
+        const wrap = document.createElement('div');
+        wrap.className='param-field';
+        let input;
+        const labelText = (def['ui:label']||key) + (required.has(key)?' *':'');
+        if(def.type==='boolean'){
+            input = document.createElement('select');
+            input.name=key; input.id=key;
+            const optFalse = document.createElement('option'); optFalse.value='false'; optFalse.textContent='false';
+            const optTrue = document.createElement('option'); optTrue.value='true'; optTrue.textContent='true';
+            input.appendChild(optFalse); input.appendChild(optTrue);
+            const label=document.createElement('label');
+            label.textContent=labelText+': ';
+            wrap.appendChild(label);
+            wrap.appendChild(input);
+        } else if(def.type==='integer' || def.type==='number'){
+          input = document.createElement('input');
+          input.type='number';
+          input.name=key; input.id=key;
+          if(def.minimum!==undefined) input.min=def.minimum;
+          if(def.default!==undefined) input.value=def.default;
+          wrap.innerHTML = `<label>${labelText}:<br></label>`;
+          wrap.appendChild(input);
+        } else if(def.type==='array'){
+            input = document.createElement('textarea');
+            input.name=key; input.id=key;
+            input.rows=2;
+            input.dataset.arrayInput = def['ui:arrayInput'] || 'csv';
+            input.placeholder=def['ui:placeholder']||'comma separated';
+            wrap.innerHTML = `<label>${labelText} (array):<br></label>`;
+            wrap.appendChild(input);
+            // If SIMICE and this is is_binary, add configure button
+            if (schema.multi_column && key === 'is_binary') {
+              input.readOnly = true;
+              const btn = document.createElement('button');
+              btn.type = 'button';
+              btn.textContent = 'Configure per column';
+              btn.className = 'config-inline';
+              btn.id = 'open-binary-config';
+              wrap.appendChild(btn);
+              const hint = document.createElement('div');
+              hint.className = 'param-hint';
+              hint.textContent = 'Use Update to apply choices here. Not saved to database until you press Create.';
+              wrap.appendChild(hint);
+            }
+        } else {
+          if(def.enum){
+            input=document.createElement('select');
+            input.name=key; input.id=key;
+            def.enum.forEach(val=>{
+              const opt=document.createElement('option');opt.value=val;opt.textContent=val;input.appendChild(opt);
+            });
+          } else {
+            input = document.createElement('input');
+            input.type='text';
+            input.name=key; input.id=key;
+            if(def.default!==undefined) input.value=def.default;
+            if(def['ui:placeholder']) input.placeholder=def['ui:placeholder'];
+          }
+          wrap.innerHTML = `<label>${labelText}:<br></label>`;
+          wrap.appendChild(input);
+        }
+        if(required.has(key)) input.required = true;
+        if(def.description){
+          const p=document.createElement('div');
+          p.style.fontSize='0.75em';p.style.color='#666';
+          p.textContent=def.description;
+          wrap.appendChild(p);
+        }
+        frag.appendChild(wrap);
+      });
+      container.appendChild(frag);
+    }
+  const algoSelect = document.getElementById('algo-select');
+  algoSelect.addEventListener('change', (e)=> renderParams(e.target.value));
+  document.addEventListener('DOMContentLoaded', ()=>{ renderParams(algoSelect.value); });
+  // Binary configuration modal logic (multi-column only)
+  function getSelectedTargetHeaders(){
+    const multiSelect = document.getElementById('simice-headers-select');
+    if(!multiSelect) return [];
+    return Array.from(multiSelect.selectedOptions).map(opt=>({ idx: opt.value, label: opt.textContent||opt.value }));
+  }
+  function openBinaryConfig(){
+    const modal = document.getElementById('binary-config-modal');
+    const list = document.getElementById('binary-config-list');
+    const isBinaryTextarea = document.getElementById('is_binary');
+    if(!modal || !list || !isBinaryTextarea) return;
+    list.innerHTML='';
+    const selected = getSelectedTargetHeaders();
+    // Existing values
+    const existing = (isBinaryTextarea.value||'').split(',').map(s=>s.trim().toLowerCase()).filter(s=>s.length>0);
+    selected.forEach((col, i)=>{
+      const rowLabel = document.createElement('div');
+      rowLabel.textContent = col.label;
+      const select = document.createElement('select');
+      select.dataset.colIndex = col.idx;
+      ['true','false'].forEach(v=>{ const o=document.createElement('option');o.value=v;o.textContent=v;select.appendChild(o); });
+      if(existing[i]=== 'true' || existing[i]==='false') select.value = existing[i];
+      else select.value='false';
+      list.appendChild(rowLabel);
+      list.appendChild(select);
+    });
+    modal.style.display='flex';
+  }
+  function closeBinaryConfig(){
+    const modal = document.getElementById('binary-config-modal');
+    if(modal) modal.style.display='none';
+  }
+  function saveBinaryConfig(e){
+    if(e) e.preventDefault();
+    const list = document.getElementById('binary-config-list');
+    const isBinaryTextarea = document.getElementById('is_binary');
+    if(!list || !isBinaryTextarea) return;
+    const selects = Array.from(list.querySelectorAll('select'));
+    const vals = selects.map(s=>s.value);
+    isBinaryTextarea.value = vals.join(',');
+    closeBinaryConfig();
+  }
+  document.addEventListener('click', (e)=>{
+    if(e.target && e.target.id==='open-binary-config'){
+      openBinaryConfig();
+    } else if(e.target && e.target.id==='binary-config-cancel'){
+      closeBinaryConfig();
+    }
+  });
+  // Attach click handler to Update button (not a real form submit)
+  document.getElementById('binary-config-save')?.addEventListener('click', saveBinaryConfig);
+  // Keep is_binary length synced when headers change
+  function syncIsBinaryLengths(){
+    const isBinaryTextarea = document.getElementById('is_binary');
+    if(!isBinaryTextarea) return;
+    const selected = getSelectedTargetHeaders();
+    const existing = (isBinaryTextarea.value||'').split(',').map(s=>s.trim()).filter(s=>s.length>0);
+    const needed = selected.length;
+    if(needed===0){ isBinaryTextarea.value=''; return; }
+    // Adjust existing length
+    while(existing.length < needed) existing.push('false');
+    if(existing.length > needed) existing.length = needed;
+    isBinaryTextarea.value = existing.join(',');
+  }
+  document.getElementById('simice-headers-select')?.addEventListener('change', syncIsBinaryLengths);
+  document.getElementById('simice-headers-select')?.addEventListener('click', syncIsBinaryLengths);
+
+  // Client-side validation for clearer feedback (participants, SIMI required fields)
+  const createForm = document.querySelector('form');
+  if (createForm) {
+    createForm.addEventListener('submit', (e) => {
+      const participants = createForm.querySelector("select[name='participants']");
+      if (participants && participants.selectedOptions.length === 0) {
+        e.preventDefault();
+        alert('Please select at least one participant.');
+        participants.focus();
+        return;
+      }
+      const algoSel = document.getElementById('algo-select');
+      const algoVal = (algoSel?.value || '').toUpperCase();
+      if (algoVal === 'SIMI') {
+        const tci = document.getElementById('target_column_index');
+        const bin = document.getElementById('is_binary');
+        const trials = document.getElementById('imputation_trials');
+        if (!tci || !bin || !trials) {
+          // Let server validate if anything missing
+          return;
+        }
+        if (!tci.value || Number(tci.value) < 1) {
+          e.preventDefault();
+          alert('Target Column Index must be 1 or greater.');
+          tci.focus();
+          return;
+        }
+        if (!bin.value) {
+          e.preventDefault();
+          alert('Please choose Binary Target? true/false.');
+          bin.focus();
+          return;
+        }
+        if (!trials.value || Number(trials.value) < 1) {
+          e.preventDefault();
+          alert('Imputation Trials must be 1 or greater.');
+          trials.focus();
+          return;
+        }
+      } else if (algoVal === 'SIMICE') {
+        const idxEl = document.getElementById('target_column_indexes');
+        const binEl = document.getElementById('is_binary');
+        const iter0 = document.getElementById('iteration_before_first_imputation');
+        const iter = document.getElementById('iteration_between_imputations');
+        const trials = document.getElementById('imputation_trials');
+        if (!idxEl || !binEl || !iter0 || !iter || !trials) {
+          // Let server validate if anything missing
+          return;
+        }
+        const rawIdx = (idxEl.value || '').split(',').map(s=>s.trim()).filter(s=>s.length>0);
+        const idxs = rawIdx.map(v=>parseInt(v,10)).filter(v=>Number.isFinite(v));
+        if (idxs.length === 0 || idxs.length !== rawIdx.length || idxs.some(v=>v < 1)) {
+          e.preventDefault();
+          alert('Target Column Indexes must be a comma-separated list of integers >= 1.');
+          idxEl.focus();
+          return;
+        }
+        const bins = (binEl.value || '').split(',').map(s=>s.trim().toLowerCase()).filter(s=>s.length>0);
+        if (bins.length !== idxs.length) {
+          e.preventDefault();
+          alert('Is Binary list must have the same number of values as selected target columns. Use "Configure per column".');
+          document.getElementById('open-binary-config')?.focus();
+          return;
+        }
+        if (bins.some(b=>!(b==='true' || b==='false'))) {
+          e.preventDefault();
+          alert('Is Binary values must be true or false.');
+          document.getElementById('open-binary-config')?.focus();
+          return;
+        }
+        if (iter0.value === '' || Number(iter0.value) < 0) {
+          e.preventDefault();
+          alert('Iterations (before first) must be 0 or greater.');
+          iter0.focus();
+          return;
+        }
+        if (iter.value === '' || Number(iter.value) < 0) {
+          e.preventDefault();
+          alert('Iterations (between) must be 0 or greater.');
+          iter.focus();
+          return;
+        }
+        if (trials.value === '' || Number(trials.value) < 1) {
+          e.preventDefault();
+          alert('Imputation Trials must be 1 or greater.');
+          trials.focus();
+          return;
+        }
+      }
+    });
+  }
+  </script>
 </body>
 </html>

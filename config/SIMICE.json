@@ -1,34 +1,61 @@
 {
-    "title": "SIMICE Algorithm Parameters",
+    "title": "SIMICE",
+    "base": "SIMICE",
     "type": "object",
+    "multi_column": true,
+    "required": [
+        "target_column_indexes",
+        "is_binary",
+        "iteration_before_first_imputation",
+        "iteration_between_imputations",
+        "imputation_trials"
+    ],
+    "ui:order": [
+        "target_column_indexes",
+        "is_binary",
+        "iteration_before_first_imputation",
+        "iteration_between_imputations",
+        "imputation_trials"
+    ],
     "properties": {
         "target_column_indexes": {
             "type": "array",
             "items": { "type": "integer", "minimum": 1 },
             "minItems": 1,
-            "description": "List of 1-based indices of columns to be imputed."
+            "description": "List of 1-based indices of columns to be imputed.",
+            "ui:label": "Target Column Indexes",
+            "ui:placeholder": "e.g., 2,5,7",
+            "ui:arrayInput": "csv"
         },
         "is_binary": {
             "type": "array",
             "items": { "type": "boolean" },
             "minItems": 1,
-            "description": "List of booleans per target column indicating binary (true) or continuous (false). Order aligns with target_column_indexes."
+            "description": "List of booleans per target column indicating binary (true) or continuous (false). Order aligns with target_column_indexes.",
+            "ui:label": "Is Binary (per column)",
+            "ui:placeholder": "true,false,true",
+            "ui:arrayInput": "csv"
         },
         "iteration_before_first_imputation": {
             "type": "integer",
             "minimum": 0,
-            "description": "Iterations to run before the first imputation round."
+            "default": 0,
+            "description": "Iterations to run before the first imputation round.",
+            "ui:label": "Iterations (before first)"
         },
         "iteration_between_imputations": {
             "type": "integer",
             "minimum": 0,
-            "description": "Iterations to run between subsequent imputations."
+            "default": 0,
+            "description": "Iterations to run between subsequent imputations.",
+            "ui:label": "Iterations (between)"
+        },
+        "imputation_trials": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10,
+            "description": "Number of imputation trials to perform.",
+            "ui:label": "Imputation Trials"
         }
-    },
-    "required": [
-        "target_column_indexes",
-        "is_binary",
-        "iteration_before_first_imputation",
-        "iteration_between_imputations"
-    ]
+    }
 }

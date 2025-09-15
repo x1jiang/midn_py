@@ -19,6 +19,8 @@ import sys
 from . import models, schemas, services
 from .db import get_db, engine
 from .core.config import settings
+from .core.alg_config import load_all_algorithm_schemas, validate_parameters
+from .core.alg_runtime import build_runtime_config
 from .core.csrf import get_csrf_token, gen_csrf_token, CSRF_COOKIE
 from .api import users as sites_api, jobs, remote as remote_api
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -59,6 +61,47 @@ app.add_middleware(
 # GUI setup
 app.mount("/static", StaticFiles(directory="central/app/static"), name="static")
 templates = Jinja2Templates(directory="central/app/templates")
+
+# Helper: order parameters according to algorithm schema ui:order (similar to create_job rendering)
+def _order_parameters(algo: str, params: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not params:
+        return {}
+    schemas = load_all_algorithm_schemas()
+    schema = schemas.get(algo)
+    if not schema:
+        return params
+    order = schema.get('ui:order') or []
+    if not isinstance(order, list) or not order:
+        return params
+    # Alias map to reconcile stored param names with schema names
+    # SIMICE historically stored list under is_binary_list while schema uses is_binary
+    alias_map: Dict[str, str] = {}
+    if algo.upper() == 'SIMICE':
+        # Always map schema key is_binary to storage key is_binary_list if latter exists
+        if 'is_binary_list' in params:
+            alias_map['is_binary'] = 'is_binary_list'
+    ordered: Dict[str, Any] = {}
+    seen_storage_keys: Set[str] = set()
+    # Add in declared order first, resolving aliases
+    for schema_key in order:
+        storage_key = alias_map.get(schema_key, schema_key)
+        if storage_key in params:
+            ordered[schema_key] = params[storage_key]
+            seen_storage_keys.add(storage_key)
+    # Append any remaining original keys (that weren't mapped) deterministically (alphabetical by their display/storage key)
+    for storage_key in sorted(params.keys()):
+        if storage_key not in seen_storage_keys:
+            # Use schema-style key if reverse alias matches, else storage key
+            reverse_key = None
+            for k, v in alias_map.items():
+                if v == storage_key:
+                    reverse_key = k
+                    break
+            display_key = reverse_key or storage_key
+            if display_key not in ordered:
+                ordered[display_key] = params[storage_key]
+    print(f"_order_parameters algo={algo} order={order} input_keys={list(params.keys())} ordered_keys={list(ordered.keys())}")
+    return ordered
 
 # API routers (kept for programmatic access)
 app.include_router(sites_api.router, prefix="/api/sites", tags=["sites"])
@@ -267,6 +310,7 @@ async def gui_jobs_create_get(request: Request, db: Session = Depends(get_db)):
         "csrf_token": token,
         "algorithms": settings._ALG,
         "approved_users": approved,
+        "alg_schemas": load_all_algorithm_schemas(),
     })
     if not get_csrf_token(request):
         resp.set_cookie(CSRF_COOKIE, token, httponly=False, samesite="lax")
@@ -279,13 +323,8 @@ async def gui_jobs_create_post(
     name: str = Form(...),
     description: str = Form(""),
     participants: list[str] = Form([]),
-    target_column_index: str = Form(None),
-    is_binary: bool = Form(False),
-    target_column_indexes: str = Form("") ,
-    is_binary_list: str = Form("") ,
-    iteration_before_first_imputation: int = Form(None),
-    iteration_between_imputations: int = Form(None),
-    imputation_trials: int = Form(10),
+    # Dynamic params will arrive; keep legacy fields but treat generically
+    # legacy field removed; if needed must be in schema now
     csrf_token: str = Form(""),
     db: Session = Depends(get_db)
 ):
@@ -297,42 +336,14 @@ async def gui_jobs_create_post(
     if algo not in settings._ALG:
         return HTMLResponse("Unsupported algorithm", status_code=400)
 
-    # Build parameters based on algorithm
-    if algo == 'SIMI':
-        try:
-            idx = int(target_column_index) if target_column_index not in (None, "") else None
-        except ValueError:
-            return HTMLResponse("Target column index must be an integer", status_code=400)
-        if idx is None or idx < 1:
-            return HTMLResponse("Target column index is required (1-based)", status_code=400)
-        params = {"target_column_index": idx, "is_binary": is_binary}
-        missing_spec = {"target_column_index": idx, "": is_binary}
-    elif algo == 'SIMICE':
-        try:
-            idxs = [int(x.strip()) for x in target_column_indexes.split(',') if x.strip()]
-            bins = [s.strip().lower() in ('true','1','yes') for s in is_binary_list.split(',') if s.strip()]
-        except ValueError:
-            return HTMLResponse("Invalid indexes or boolean list", status_code=400)
-        if not idxs or len(bins) != len(idxs):
-            return HTMLResponse("Indexes and is_binary list must be same length and non-empty", status_code=400)
-        if iteration_before_first_imputation is None or iteration_between_imputations is None:
-            return HTMLResponse("Iteration fields are required for SIMICE", status_code=400)
-        params = {
-            "target_column_indexes": idxs,
-            "is_binary_list": bins,
-            "iteration_before_first_imputation": iteration_before_first_imputation,
-            "iteration_between_imputations": iteration_between_imputations,
-            "imputation_trials": imputation_trials
-        }
-        # For multi-feature, missing_spec can mirror params specific fields
-        missing_spec = {
-            "target_column_indexes": idxs,
-            "is_binary_list": bins,
-            #"iteration_before_first_imputation": iteration_before_first_imputation,
-            #"iteration_between_imputations": iteration_between_imputations
-        }
-    else:
-        return HTMLResponse("Unsupported algorithm", status_code=400)
+    # Collect raw form data for dynamic validation
+    form = await request.form()
+    raw_map = {k: v for k, v in form.items() if k not in {"algorithm","name","description","participants","csrf_token"}}
+    try:
+        params = validate_parameters(algo, raw_map)
+    except ValueError as ve:
+        return HTMLResponse(str(ve), status_code=400)
+    # Basic missing spec concept removed; all data stays in parameters
 
     job = schemas.JobCreate(
         name=name,
@@ -340,8 +351,7 @@ async def gui_jobs_create_post(
         algorithm=algo,
         parameters=params,
         participants=participants,
-        missing_spec=missing_spec,
-        imputation_trials=imputation_trials,
+    # removed missing_spec/imputation_trials
     )
     db_job = services.job_service.create_job(db, job, owner_id=None)
     return templates.TemplateResponse("confirm.html", {"request": request, "message": f"Job created. ID={db_job.id}"})
@@ -366,32 +376,16 @@ async def gui_jobs_start_get(request: Request, db: Session = Depends(get_db)):
             "parameters": {},
         }
         if job.parameters:
-            if job.algorithm == "SIMI":
-                ordered_params: Dict[str, Any] = {}
-                if "target_column_index" in job.parameters:
-                    ordered_params["target_column_index"] = job.parameters["target_column_index"]
-                if "is_binary" in job.parameters:
-                    ordered_params["is_binary"] = job.parameters["is_binary"]
-                for k, v in job.parameters.items():
-                    if k not in ordered_params:
-                        ordered_params[k] = v
-                job_dict["parameters"] = ordered_params
-            elif job.algorithm == "SIMICE":
-                ordered_params = {}
-                if "target_column_indexes" in job.parameters:
-                    ordered_params["target_column_indexes"] = job.parameters["target_column_indexes"]
-                if "is_binary_list" in job.parameters:
-                    ordered_params["is_binary_list"] = job.parameters["is_binary_list"]
-                for k, v in job.parameters.items():
-                    if k not in ordered_params:
-                        ordered_params[k] = v
-                job_dict["parameters"] = ordered_params
-            else:
-                job_dict["parameters"] = job.parameters
-        job_dict["iteration_before_first_imputation"] = job.iteration_before_first_imputation
-        job_dict["iteration_between_imputations"] = job.iteration_between_imputations
-        job_dict["imputation_trials"] = job.imputation_trials
-        job_dict["missing_spec"] = job.missing_spec
+            # Normalize legacy SIMICE naming then apply schema ordering
+            normalized = dict(job.parameters)
+            if job.algorithm == "SIMICE" and "is_binary" in normalized and "is_binary_list" not in normalized and isinstance(normalized.get("is_binary"), list):
+                normalized["is_binary_list"] = normalized.pop("is_binary")
+            # Apply schema ui:order
+            ordered_schema = _order_parameters(job.algorithm, normalized)
+            job_dict["parameters"] = ordered_schema
+            # Preserve explicit order for frontend (list of keys in insertion order)
+            job_dict["param_order"] = list(ordered_schema.keys())
+        # include owner id per job and append within loop so all jobs retained
         job_dict["owner_id"] = job.owner_id
         jobs.append(job_dict)
 
@@ -434,32 +428,13 @@ async def gui_jobs_start_post(
             "parameters": {},
         }
         if job.parameters:
-            if job.algorithm == "SIMI":
-                ordered_params = {}
-                if "target_column_index" in job.parameters:
-                    ordered_params["target_column_index"] = job.parameters["target_column_index"]
-                if "is_binary" in job.parameters:
-                    ordered_params["is_binary"] = job.parameters["is_binary"]
-                for key, value in job.parameters.items():
-                    if key not in ordered_params:
-                        ordered_params[key] = value
-                job_dict["parameters"] = ordered_params
-            elif job.algorithm == "SIMICE":
-                ordered_params = {}
-                if "target_column_indexes" in job.parameters:
-                    ordered_params["target_column_indexes"] = job.parameters["target_column_indexes"]
-                if "is_binary_list" in job.parameters:
-                    ordered_params["is_binary_list"] = job.parameters["is_binary_list"]
-                for key, value in job.parameters.items():
-                    if key not in ordered_params:
-                        ordered_params[key] = value
-                job_dict["parameters"] = ordered_params
-            else:
-                job_dict["parameters"] = job.parameters
-        job_dict["iteration_before_first_imputation"] = job.iteration_before_first_imputation
-        job_dict["iteration_between_imputations"] = job.iteration_between_imputations
-        job_dict["imputation_trials"] = job.imputation_trials
-        job_dict["missing_spec"] = job.missing_spec
+            normalized = dict(job.parameters)
+            if job.algorithm == "SIMICE" and "is_binary" in normalized and "is_binary_list" not in normalized and isinstance(normalized.get("is_binary"), list):
+                normalized["is_binary_list"] = normalized.pop("is_binary")
+            ordered_schema = _order_parameters(job.algorithm, normalized)
+            job_dict["parameters"] = ordered_schema
+            job_dict["param_order"] = list(ordered_schema.keys())
+    # legacy iteration/imputation/missing_spec removed
         job_dict["owner_id"] = job.owner_id
         jobs.append(job_dict)
         
@@ -477,103 +452,8 @@ async def gui_jobs_start_post(
         
         # Build base config from stored parameters then normalize per algorithm expectations
         raw_params: Dict[str, Any] = dict(db_job.parameters or {})
-        config: Dict[str, Any] = {}
-        if algorithm_name == "simi":
-            # Expected keys for SIMI central: M, mvar (0-based), method (Gaussian|logistic)
-            # Source fields from stored params / job fields:
-            # - imputation_trials -> M (fallback 1)
-            # - target_column_index (assumed 1-based from UI) -> mvar (0-based)
-            # - is_binary -> method logistic else Gaussian
-            target_idx = raw_params.get("target_column_index")
-            if target_idx is not None:
-                # Accept either 0-based or 1-based: treat ints >0; if user provided 0 assume already 0-based
-                try:
-                    t_int = int(target_idx)
-                    mvar = t_int - 1 if t_int > 0 else t_int
-                except Exception:
-                    mvar = target_idx
-            else:
-                mvar = raw_params.get("mvar")  # allow direct provision
-            method = None
-            if "is_binary" in raw_params:
-                method = "logistic" if raw_params.get("is_binary") else "Gaussian"
-            elif "method" in raw_params:
-                method = raw_params["method"]
-            config["M"] = db_job.imputation_trials or raw_params.get("M") or 1
-            if mvar is not None:
-                config["mvar"] = mvar
-            if method is not None:
-                config["method"] = method
-            # Copy any other untouched params (avoid overwriting the normalized ones)
-            for k, v in raw_params.items():
-                if k not in ("target_column_index", "is_binary", "mvar", "method") and k not in config:
-                    config[k] = v
-            print(f"SIMI config constructed: {config}")        
-        elif algorithm_name == "simice":
-            # Simplified mapping for SIMICE expected keys: M, mvar (0-based list), type_list, iter_val, iter0_val
-            def _int_list(val):
-                if val is None:
-                    return []
-                if isinstance(val, str):
-                    parts = [p.strip() for p in val.split(',') if p.strip()]
-                else:
-                    parts = list(val)
-                out: List[int] = []
-                for p in parts:
-                    try:
-                        iv = int(p)
-                        out.append(iv - 1 if iv > 0 else iv)
-                    except Exception:
-                        continue
-                return out
-
-            # mvar sources: target_column_indexes (UI, 1-based) or existing mvar
-            mvar_list = _int_list(raw_params.get("target_column_indexes") or raw_params.get("mvar"))
-
-            # type_list: direct or derive from is_binary_list / is_binary
-            if "type_list" in raw_params and isinstance(raw_params.get("type_list"), list):
-                type_list = raw_params["type_list"]
-            else:
-                bin_list = None
-                if "is_binary_list" in raw_params:
-                    bin_list = raw_params["is_binary_list"]
-                elif "is_binary" in raw_params and isinstance(raw_params.get("is_binary"), list):
-                    bin_list = raw_params["is_binary"]
-                elif "is_binary" in raw_params and mvar_list:
-                    bin_list = [raw_params["is_binary"]] * len(mvar_list)
-                type_list = ["logistic" if b else "Gaussian" for b in (bin_list or [])]
-
-            # Iterations: prefer DB columns, then canonical keys, then GUI keys
-            iter_val = (db_job.iteration_between_imputations
-                        if db_job.iteration_between_imputations is not None else
-                        raw_params.get("iter_val", raw_params.get("iteration_between_imputations")))
-            iter0_val = (db_job.iteration_before_first_imputation
-                         if db_job.iteration_before_first_imputation is not None else
-                         raw_params.get("iter0_val", raw_params.get("iteration_before_first_imputation")))
-
-            config.update({
-                "M": db_job.imputation_trials or raw_params.get("M") or 1,
-            })
-            if mvar_list:
-                config["mvar"] = mvar_list
-            if type_list:
-                config["type_list"] = type_list
-            if iter_val is not None:
-                config["iter_val"] = iter_val
-            if iter0_val is not None:
-                config["iter0_val"] = iter0_val
-
-            # Pass through any extra keys (excluding GUI-only / duplicates)
-            skip = {"target_column_indexes", "is_binary_list", "is_binary",
-                    "iteration_before_first_imputation", "iteration_between_imputations",
-                    "mvar", "type_list", "iter_val", "iter0_val"}
-            for k, v in raw_params.items():
-                if k in skip or k in config:
-                    continue
-                config[k] = v
-            print(f"SIMICE config constructed: {config}")
-        else:
-            config = raw_params
+        config = build_runtime_config(algorithm_name, db_job)
+        print(f"Runtime config constructed ({algorithm_name}): {config}")
         # participants hold site IDs
         site_ids: List[str] = list(db_job.participants or [])
         # prepare numpy matrix
@@ -599,24 +479,6 @@ async def gui_jobs_start_post(
                 # Debug: record raw and normalized config before invocation
                 jobs_runtime[job_id_local]["messages"].append(f"DEBUG raw_params={raw_params}")
                 jobs_runtime[job_id_local]["messages"].append(f"DEBUG config_pre_call={config}")
-                # Fallback repair if SIMI missing required keys
-                if algorithm_name == "simi":
-                    missing_keys = [k for k in ("M","mvar","method") if k not in config]
-                    if missing_keys:
-                        # Attempt repair
-                        tgt = raw_params.get("target_column_index")
-                        if tgt is not None and "mvar" not in config:
-                            try:
-                                ti = int(tgt)
-                                config["mvar"] = ti - 1 if ti > 0 else ti
-                            except Exception:
-                                pass
-                        if "method" not in config:
-                            if "is_binary" in raw_params:
-                                config["method"] = "logistic" if raw_params.get("is_binary") else "Gaussian"
-                        if "M" not in config:
-                            config["M"] = db_job.imputation_trials or raw_params.get("M") or 1
-                        jobs_runtime[job_id_local]["messages"].append(f"DEBUG repaired_config={config}")
                 if algorithm_name == "simi":
                     algorithm_central = importlib.import_module("SIMI.SIMICentral").simi_central
                 elif algorithm_name == "simice":
@@ -727,7 +589,8 @@ async def gui_jobs_edit_get(request: Request, job_id: int, db: Session = Depends
         "request": request, 
         "job": job, 
         "csrf_token": token,
-        "approved_users": approved
+        "approved_users": approved,
+        "alg_schemas": load_all_algorithm_schemas(),
     })
     if not get_csrf_token(request):
         resp.set_cookie(CSRF_COOKIE, token, httponly=False, samesite="lax")
@@ -737,13 +600,7 @@ async def gui_jobs_edit_get(request: Request, job_id: int, db: Session = Depends
 async def gui_jobs_edit_post(request: Request, job_id: int,
                              name: str = Form(None), description: str = Form(None),
                              participants: list[str] = Form([]),
-                             target_column_index: str = Form(None),
-                             is_binary: bool = Form(False),
-                             target_column_indexes: str = Form(""),
-                             is_binary_list: str = Form(""),
-                             iteration_before_first_imputation: int = Form(None),
-                             iteration_between_imputations: int = Form(None),
-                             imputation_trials: int = Form(None),
+                            # legacy imputation_trials removed
                              csrf_token: str = Form(""),
                              db: Session = Depends(get_db)):
     if not is_admin(request):
@@ -755,54 +612,24 @@ async def gui_jobs_edit_post(request: Request, job_id: int,
         return templates.TemplateResponse("confirm.html", {"request": request, "message": "Job not found."})
 
     # Update name/desc/participants/trials
+    # Update only supported simple fields; trials now live inside parameters if defined by schema
     updated = services.job_service.update_job(db, job_id, name=name, description=description,
-                                              participants=participants, imputation_trials=imputation_trials)
+                                              participants=participants)
     if not updated:
         return templates.TemplateResponse("confirm.html", {"request": request, "message": "Job not found."})
 
-    # Build parameters and missing_spec based on algorithm (mirror creation logic)
     algo = (job.algorithm or '').upper()
-
-    if algo == 'SIMI':
-        try:
-            idx = int(target_column_index) if target_column_index not in (None, "") else None
-        except ValueError:
-            return HTMLResponse("Target column index must be an integer", status_code=400)
-        if idx is None or idx < 1:
-            return HTMLResponse("Target column index is required (1-based)", status_code=400)
-        params = {"target_column_index": idx, "is_binary": is_binary}
-        missing_spec = {"target_column_index": idx, "": is_binary}
-    elif algo == 'SIMICE':
-        try:
-            idxs = [int(x.strip()) for x in target_column_indexes.split(',') if x.strip()]
-            bins = [s.strip().lower() in ('true','1','yes') for s in is_binary_list.split(',') if s.strip()]
-        except ValueError:
-            return HTMLResponse("Invalid indexes or boolean list", status_code=400)
-        if not idxs or len(bins) != len(idxs):
-            return HTMLResponse("Indexes and is_binary list must be same length and non-empty", status_code=400)
-        if iteration_before_first_imputation is None or iteration_between_imputations is None:
-            return HTMLResponse("Iteration fields are required for SIMICE", status_code=400)
-        params = {
-            "target_column_indexes": idxs,
-            "is_binary_list": bins,
-            "iteration_before_first_imputation": iteration_before_first_imputation,
-            "iteration_between_imputations": iteration_between_imputations,
-            # Keep parity with creation: include imputation_trials inside params (also stored as column)
-            "imputation_trials": (imputation_trials if imputation_trials is not None else updated.imputation_trials)
-        }
-        missing_spec = {
-            "target_column_indexes": idxs,
-            "is_binary_list": bins,
-        }
-    else:
-        return HTMLResponse("Unsupported algorithm", status_code=400)
+    form = await request.form()
+    raw_map = {k: v for k, v in form.items() if k not in {"name","description","participants","csrf_token"}}
+    try:
+        params = validate_parameters(algo, raw_map)
+    except ValueError as ve:
+        return HTMLResponse(str(ve), status_code=400)
+    # legacy imputation_trials/missing_spec removed
 
     # Assign updated fields
     updated.parameters = params
-    updated.missing_spec = missing_spec
-    updated.iteration_before_first_imputation = iteration_before_first_imputation
-    updated.iteration_between_imputations = iteration_between_imputations
-    updated.imputation_trials = imputation_trials  
+    # removed legacy assignments
     
     db.add(updated)
     db.commit()
@@ -818,7 +645,8 @@ async def gui_jobs_delete_post(request: Request, job_id: int, csrf_token: str = 
     ok = services.job_service.delete_job(db, job_id)
     if not ok:
         return templates.TemplateResponse("confirm.html", {"request": request, "message": "Job not found."})
-    return templates.TemplateResponse("confirm.html", {"request": request, "message": f"Job {job_id} deleted."})
+    # Redirect back to jobs list after deletion
+    return RedirectResponse(url="/gui/jobs", status_code=303)
 
 # --------------- Existing API/WebSocket ----------------
 # Removed deprecated /api/jobs/{job_id}/start endpoint (duplicate of GUI POST /gui/jobs/start)

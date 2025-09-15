@@ -33,46 +33,74 @@
           </select>
         </label><br>
 
-        {% if job.algorithm.upper() == 'SIMI' %}
-        <div class="section-simi">
-          <h3>SIMI Parameters</h3>
-          <label>Target Column Index (1-based):<br>
-            <input type="number" name="target_column_index" min="1" value="{{ job.parameters.get('target_column_index') }}">
-          </label><br>
-          <div class="checkbox-container">
-            <input type="checkbox" name="is_binary" id="edit_is_binary" value="true" {% if job.parameters.get('is_binary') %}checked{% endif %}>
-            <label for="edit_is_binary">Binary Target</label>
-          </div><br>
-        </div>
-        {% endif %}
-
-        {% if job.algorithm.upper() == 'SIMICE' %}
-        <div class="section-simice">
-          <h3>SIMICE Parameters</h3>
-          <label>Target Column Indexes (comma-separated 1-based):<br>
-            <input type="text" name="target_column_indexes" value="{{ (job.parameters.get('target_column_indexes') or []) | join(',') }}">
-          </label><br>
-          {% set _bin_list = job.parameters.get('is_binary_list') if job.parameters.get('is_binary_list') is not none else job.parameters.get('is_binary') %}
-          {% if _bin_list is string %}
-            {% set _bin_list = [_bin_list] %}
-          {% endif %}
-          <label for="is_binary_list">Is Binary per column (comma-separated true/false):<br>
-            <input type="text" name="is_binary_list" id="is_binary_list" value="{% if _bin_list %}{{ _bin_list | map('lower') | join(',') if _bin_list and _bin_list[0] is string else _bin_list | map('string') | map('lower') | join(',') }}{% endif %}">
-          </label><br>
-          <label>Iter before first:<br>
-            <input type="number" name="iteration_before_first_imputation" min="0" value="{{ job.parameters.get('iteration_before_first_imputation') }}">
-          </label><br>
-          <label>Iter between:<br>
-            <input type="number" name="iteration_between_imputations" min="0" value="{{ job.parameters.get('iteration_between_imputations') }}">
-          </label><br>
-        </div>
-        {% endif %}
-
-        <label>Number of Imputation Trials:<br><input type="number" name="imputation_trials" value="{{ job.imputation_trials or 10 }}" min="1"></label><br>
+        <div id="dynamic-params"></div>
+        <p style="font-size:0.8em;color:#555">Parameters generated from config schema. Existing values pre-filled.</p>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit">Save</button>
       </form>
     </div>
   </main>
+  <script id="alg-schemas" type="application/json">{{ alg_schemas | tojson | safe }}</script>
+  <script id="existing-params" type="application/json">{{ job.parameters | tojson | safe }}</script>
+  <script>
+    const ALG_SCHEMAS = JSON.parse(document.getElementById('alg-schemas').textContent);
+    const algo = '{{ job.algorithm.upper() }}';
+    const existing = JSON.parse(document.getElementById('existing-params').textContent);
+    function render(){
+      const container=document.getElementById('dynamic-params');
+      container.innerHTML='';
+      const schema = ALG_SCHEMAS[algo];
+      if(!schema){container.textContent='No schema.';return;}
+      const h=document.createElement('h3');h.textContent=algo+' Parameters';container.appendChild(h);
+      const required = new Set(schema.required||[]);
+      let entries = Object.entries(schema.properties||{});
+      const order = Array.isArray(schema['ui:order']) ? schema['ui:order'] : [];
+      if(order.length){
+        const orderIndex = new Map(order.map((k,i)=>[k,i]));
+        entries.sort((a,b)=>{
+          const ai = orderIndex.has(a[0])?orderIndex.get(a[0]):Number.MAX_SAFE_INTEGER;
+          const bi = orderIndex.has(b[0])?orderIndex.get(b[0]):Number.MAX_SAFE_INTEGER;
+          return ai-bi || a[0].localeCompare(b[0]);
+        });
+      }
+      for(const [k,def] of entries){
+        const wrap=document.createElement('div');
+        let input;
+        const labelText=(def['ui:label']||k)+(required.has(k)?' *':'');
+        if(def.type==='boolean'){
+          input=document.createElement('select');input.name=k;
+          const optF=document.createElement('option');optF.value='false';optF.textContent='false';
+          const optT=document.createElement('option');optT.value='true';optT.textContent='true';
+          input.appendChild(optF);input.appendChild(optT);
+          if(String(existing[k]).toLowerCase()==='true') optT.selected=true; else optF.selected=true;
+          const lab=document.createElement('label');lab.textContent=labelText+': ';wrap.appendChild(lab);wrap.appendChild(input);
+        } else if(def.type==='integer' || def.type==='number'){
+          input=document.createElement('input');input.type='number';input.name=k; if(existing[k]!==undefined) input.value=existing[k]; else if(def.default!==undefined) input.value=def.default;
+          if(def.minimum!==undefined) input.min=def.minimum;
+          wrap.innerHTML=`<label>${labelText}:<br></label>`;wrap.appendChild(input);
+        } else if(def.type==='array'){
+          input=document.createElement('input');input.type='text';input.name=k; if(Array.isArray(existing[k])) input.value=existing[k].join(',');
+          input.placeholder=def['ui:placeholder']||'comma separated';
+          wrap.innerHTML=`<label>${labelText} (array):<br></label>`;wrap.appendChild(input);
+        } else {
+          if(def.enum){
+            input=document.createElement('select');input.name=k;def.enum.forEach(val=>{const o=document.createElement('option');o.value=val;o.textContent=val; if(existing[k]===val) o.selected=true; input.appendChild(o);});
+          } else {
+            input=document.createElement('input');input.type='text';input.name=k; if(existing[k]!==undefined) input.value=existing[k]; else if(def.default!==undefined) input.value=def.default; if(def['ui:placeholder']) input.placeholder=def['ui:placeholder'];
+          }
+          wrap.innerHTML=`<label>${labelText}:<br></label>`;wrap.appendChild(input);
+        }
+        if(required.has(k)) input.required=true;
+        if(def.description){const d=document.createElement('div');d.style.fontSize='0.7em';d.style.color='#666';d.textContent=def.description;wrap.appendChild(d);}
+        container.appendChild(wrap);
+      }
+      // Add universal trial count if not part of schema
+      if(!('imputation_trials' in (schema.properties||{}))){
+        const wrap=document.createElement('div');wrap.innerHTML='<label>imputation_trials:<br></label>';
+        const i=document.createElement('input');i.type='number';i.min='1';i.name='imputation_trials';i.value=''+(existing.imputation_trials||'10');wrap.appendChild(i);container.appendChild(wrap);
+      }
+    }
+    document.addEventListener('DOMContentLoaded', render);
+  </script>
 </body>
 </html>

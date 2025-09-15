@@ -1,18 +1,30 @@
 {
-    "title": "SIMI Algorithm Parameters",
+    "title": "SIMI",
+    "base": "SIMI",
     "type": "object",
+    "multi_column": false,
+    "required": ["target_column_index", "is_binary", "imputation_trials"],
+    "ui:order": ["target_column_index", "is_binary", "imputation_trials"],
     "properties": {
         "target_column_index": {
             "type": "integer",
-            "description": "The 1-based index of the column to be imputed."
+            "minimum": 1,
+            "description": "The 1-based index of the column to be imputed.",
+            "ui:label": "Target Column Index",
+            "ui:help": "1-based position in the uploaded dataset header order.",
+            "ui:placeholder": "e.g., 5"
         },
         "is_binary": {
             "type": "boolean",
-            "description": "Specifies if the target column is binary (true) or continuous (false)."
+            "description": "Specifies if the target column is binary (true) or continuous (false).",
+            "ui:label": "Binary Target?"
+        },
+        "imputation_trials": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 10,
+            "description": "Number of imputation trials to perform.",
+            "ui:label": "Imputation Trials"
         }
-    },
-    "required": [
-        "target_column_index",
-        "is_binary"
-    ]
+    }
 }
