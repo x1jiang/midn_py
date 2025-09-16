@@ -11,6 +11,7 @@ Public entry point:
 """
 
 import asyncio
+import os
 import numpy as np
 import pandas as pd
 import websockets
@@ -58,23 +59,28 @@ async def si_remote_logit(X: np.ndarray, y: np.ndarray, websocket: WebSocketWrap
     print(f"[si_remote_logit] Sent sample size n={n}", flush=True)
 
     while True:
-        mode = await read_integer(websocket)
+        try:
+            mode = await read_integer(websocket)
+        except ValueError as e:
+            # Protocol desync safeguard: log and continue trying; do NOT consume further envelopes improperly
+            print(f"[si_remote_logit] Failed to read mode integer: {e}", flush=True)
+            await asyncio.sleep(0.1)
+            continue
         print(f"[si_remote_logit] Mode={mode}", flush=True)
+        # Central implementation now uses 1,2 active steps and 0 as termination signal.
+        if mode == 0:
+            print("[si_remote_logit] Termination (mode 0) received", flush=True)
+            break
         if mode == -1:
-            print("[si_remote_logit] Termination signal", flush=True)
+            print("[si_remote_logit] Legacy termination (-1) received", flush=True)
             break
 
+        # For modes 1 and 2 a beta vector follows.
         beta = await read_vector(websocket)
         xb = X @ beta
         pr = expit(xb)
 
-        if mode == 0:
-            offset = (X.T @ (y - pr)) / n
-            if np.isnan(offset).any() or np.isinf(offset).any():
-                offset = np.nan_to_num(offset)
-            await write_vector(offset.astype(float), websocket)
-            print("[si_remote_logit] Sent CSL offset", flush=True)
-            return
+        # Legacy mode 0 offset phase removed; if reintroduced centrally, needs feature flag.
 
         low = pr < 0.5
         high = ~low
@@ -140,7 +146,11 @@ async def remote_kernel(D: np.ndarray, mvar: int, central_host: str, central_por
                         print(f"[{site_id}] Logistic request", flush=True)
                         await si_remote_logit(X, y, wrapped)
                     elif m == "end":
-                        print(f"[{site_id}] End received - stopping", flush=True)
+                        persist_flag = os.getenv("PERSIST_AFTER_END", "1").lower() in ("1", "true", "yes", "on")
+                        if persist_flag:
+                            print(f"[{site_id}] End received - persisting (set PERSIST_AFTER_END=0 to exit)", flush=True)
+                            continue
+                        print(f"[{site_id}] End received - stopping (persistence disabled)", flush=True)
                         return
                     elif m == "ping":
                         await write_string("pong", wrapped)
@@ -178,6 +188,33 @@ def run_remote_client(data, central_host, central_port, site_id, remote_port=Non
         print(f"[{site_id}] Ignoring remote_port={remote_port} (no local server)", flush=True)
     print(f"[{site_id}] Starting SIMI remote with mvar (0-based)={mvar_py}", flush=True)
     asyncio.run(remote_kernel(D, mvar_py, central_host, central_port, site_id))
+
+
+# ---------------------------------------------------------------
+# New async-friendly API (for in-process task execution)
+# ---------------------------------------------------------------
+async def async_run_remote_client(data, central_host, central_port, site_id, config):
+    """Async variant of run_remote_client.
+
+    Args:
+        data: path to CSV or numpy-like matrix
+        central_host, central_port, site_id: connection metadata
+        config: expects {'mvar': <1-based int>} like sync version
+    Returns: coroutine that runs until remote kernel exits/cancelled
+    """
+    if isinstance(data, str):
+        D = pd.read_csv(data).values
+    else:
+        D = data
+    if "mvar" not in config:
+        raise ValueError("Config must contain 'mvar' (1-based index) for SIMI remote")
+    mvar_py = config["mvar"] - 1
+    print(f"[async:{site_id}] Starting SIMI remote task with mvar (0-based)={mvar_py}", flush=True)
+    try:
+        await remote_kernel(D, mvar_py, central_host, central_port, site_id)
+    except asyncio.CancelledError:
+        print(f"[async:{site_id}] Cancelled SIMI remote task", flush=True)
+        raise
 
 
 if __name__ == "__main__":

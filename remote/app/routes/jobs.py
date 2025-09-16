@@ -1,5 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Dict, List, Optional
+import os
+import signal
+import asyncio
+import time
 
 router = APIRouter()
 
@@ -51,11 +55,26 @@ async def get_job_status(request: Request, job_id: int, site_id: str = None):
 
 @router.post("/stop_job")
 async def stop_job(request: Request, job_id: int, site_id: str = None):
-    """Stop a running job"""
+    """Stop a running job.
+
+    Previous implementation only flipped 'completed' and removed the entry without
+    terminating the spawned child process (multiprocessing.Process) referenced by 'pid'.
+    This allowed the remote algorithm process to continue running (and still accept
+    / produce messages) giving the illusion that cancel had no effect.
+
+    New logic:
+      1. Find job record.
+      2. Attempt graceful SIGTERM (POSIX) if pid present.
+      3. Await up to grace_period for exit (non-blocking with asyncio.sleep).
+      4. If still alive, escalate to SIGKILL.
+      5. Update messages / status accordingly.
+      6. Mark completed & remove from registry only after process is confirmed dead
+         or we have exhausted escalation attempts.
+    """
     job_status = None
     found_site_jobs_attr = None
-    
-    # If site_id is provided, look in that site's job dictionary
+
+    # Locate job
     if site_id:
         site_jobs_attr = f'running_jobs_{site_id}'
         site_jobs = getattr(request.app.state, site_jobs_attr, {})
@@ -63,7 +82,6 @@ async def stop_job(request: Request, job_id: int, site_id: str = None):
         if job_status:
             found_site_jobs_attr = site_jobs_attr
     else:
-        # Look through all site job dictionaries
         for attr_name in dir(request.app.state):
             if attr_name.startswith('running_jobs_'):
                 site_jobs = getattr(request.app.state, attr_name, {})
@@ -71,26 +89,125 @@ async def stop_job(request: Request, job_id: int, site_id: str = None):
                     job_status = site_jobs[job_id]
                     found_site_jobs_attr = attr_name
                     break
-    
-    if job_status:
-        # Mark job as completed
-        job_status['completed'] = True
-        job_status['status'] = "Job stopped by user"
-        
-        # Log job stopping
-        print(f"Job {job_id} marked as stopped")
-        
-        # Remove the job from the dictionary to prevent memory leaks
-        # This also ensures has_running_jobs won't encounter this job again
-        if found_site_jobs_attr:
-            site_jobs = getattr(request.app.state, found_site_jobs_attr)
-            if job_id in site_jobs:
-                print(f"Removing job {job_id} from {found_site_jobs_attr}")
-                del site_jobs[job_id]
-        job_status['messages'].append("Job stopped by user")
-        return {"success": True, "site_id": job_status.get('site_id', '')}
-    else:
+
+    if not job_status:
         return {"success": False, "error": "Job not found or already completed"}
+
+    # Async task cancellation path (new async-only execution model)
+    if job_status.get('async') and 'task' in job_status:
+        task = job_status.get('task')
+        # Avoid duplicate cancellation
+        if job_status.get('completed'):
+            return {"success": True, "site_id": job_status.get('site_id', ''), "already_completed": True}
+        job_status.setdefault('messages', []).append('Cancellation requested (async task)')
+        if task and not task.done():
+            job_status['status'] = 'Cancelling'
+            try:
+                task.cancel()
+                # Yield so cancellation can propagate
+                await asyncio.sleep(0)
+            except Exception as e:
+                job_status['messages'].append(f'Error issuing cancel: {e}')
+                return {"success": False, "error": f"Failed to cancel async task: {e}"}
+            # Do NOT mark completed or remove entry; lifecycle callback in start_job will finalize
+            return {"success": True, "site_id": job_status.get('site_id', ''), "async": True, "cancelled": True}
+        else:
+            # Task already finished; rely on lifecycle callback having set status
+            return {"success": True, "site_id": job_status.get('site_id', ''), "async": True, "already_done": True}
+
+    # Avoid double stop
+    if job_status.get('completed'):
+        return {"success": True, "site_id": job_status.get('site_id', ''), "already_completed": True}
+
+    pid = job_status.get('pid')
+    job_status.setdefault('messages', [])
+    job_status['messages'].append('Stop requested by user')
+    job_status['status'] = 'Cancelling...'
+    print(f"[cancel] Stop requested for job {job_id} (pid={pid})")
+
+    # Helper to test if process alive (POSIX). If no pid, treat as already stopped.
+    def _is_alive(p):
+        if not p or not isinstance(p, int):
+            return False
+        try:
+            # signal 0 does not kill, raises OSError if process does not exist
+            os.kill(p, 0)
+        except OSError:
+            return False
+        return True
+
+    termination_result = {
+        'sent_term': False,
+        'sent_kill': False,
+        'alive_after': None
+    }
+
+    # Attempt graceful termination
+    grace_period = 3.0  # seconds total to wait after SIGTERM
+    check_interval = 0.2
+    elapsed = 0.0
+
+    if _is_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            termination_result['sent_term'] = True
+            job_status['messages'].append(f'Sent SIGTERM to pid {pid}')
+            print(f"[cancel] Sent SIGTERM to pid {pid}")
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            job_status['messages'].append(f'Error sending SIGTERM: {e}')
+            print(f"[cancel] Error sending SIGTERM to pid {pid}: {e}")
+
+        # Wait for graceful exit
+        while elapsed < grace_period and _is_alive(pid):
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+
+    # Escalate if still alive
+    if _is_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+            termination_result['sent_kill'] = True
+            job_status['messages'].append(f'Sent SIGKILL to pid {pid}')
+            print(f"[cancel] Escalated to SIGKILL for pid {pid}")
+        except ProcessLookupError:
+            pass
+        except Exception as e:
+            job_status['messages'].append(f'Error sending SIGKILL: {e}')
+            print(f"[cancel] Error sending SIGKILL to pid {pid}: {e}")
+
+        # Brief wait to allow OS to reap
+        await asyncio.sleep(0.1)
+
+    still_alive = _is_alive(pid)
+    termination_result['alive_after'] = still_alive
+
+    if still_alive:
+        # Could not fully terminate; mark as completed anyway but inform user
+        job_status['messages'].append('Warning: Process may still be alive; manual cleanup might be required.')
+        job_status['status'] = 'Cancellation attempted (process may still run)'
+        print(f"[cancel] WARNING: pid {pid} still alive after escalation")
+    else:
+        job_status['messages'].append('Job process terminated')
+        job_status['status'] = 'Job stopped by user'
+        print(f"[cancel] Job {job_id} (pid={pid}) terminated successfully")
+
+    # Mark completed only after termination attempts
+    job_status['completed'] = True
+
+    # Remove entry so new jobs can start
+    if found_site_jobs_attr:
+        site_jobs = getattr(request.app.state, found_site_jobs_attr)
+        if job_id in site_jobs:
+            del site_jobs[job_id]
+            print(f"[cancel] Removed job {job_id} from registry {found_site_jobs_attr}")
+
+    return {
+        "success": True,
+        "site_id": job_status.get('site_id', ''),
+        "termination": termination_result
+    }
 
 @router.get("/check_running_jobs")
 async def check_running_jobs(request: Request, site_id: Optional[str] = None):

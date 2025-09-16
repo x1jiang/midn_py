@@ -17,7 +17,7 @@ cent_ports: a vector of local listening ports dedicated to corresponding remote 
 import numpy as np
 import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 import scipy.stats as stats
 from scipy.linalg import cholesky, cho_solve
 from scipy.special import expit
@@ -26,6 +26,7 @@ from Core.transfer import (
     write_string, read_string, write_integer, read_integer,
     WebSocketWrapper, get_wrapped_websocket
 )
+from Core.transfer import Envelope, Obj, DType, Cmd  # for robust skipping of stray envelopes
 
 # Function to set expected remote sites
 # Dictionary to store WebSocket connections for remote sites
@@ -101,16 +102,55 @@ async def simi_central(D: np.ndarray, config: dict = None, site_ids: List[str] =
       imp
     }
     """
-    # Extract parameters from config
+    # Normalize raw config (post-move: central server now passes raw DB params directly)
     if config is None:
         raise ValueError("Config dictionary is required")
-    
-    M = config.get("M")
-    mvar = config.get("mvar")
-    method = config.get("method")
-    
+    raw = dict(config)
+    norm: Dict[str, Any] = {}
+    # Accept either target_column_index (1-based) or mvar (0-based)
+    if 'mvar' in raw:
+        try:
+            norm['mvar'] = int(raw['mvar'])
+        except Exception:
+            norm['mvar'] = raw['mvar']
+    elif 'target_column_index' in raw:
+        try:
+            tci = int(raw['target_column_index'])
+            norm['mvar'] = tci - 1 if tci > 0 else tci
+        except Exception:
+            norm['mvar'] = raw['target_column_index']
+    # Map imputation_trials -> M fallback
+    if 'M' in raw:
+        norm['M'] = raw['M']
+    elif 'imputation_trials' in raw:
+        norm['M'] = raw['imputation_trials']
+    else:
+        norm['M'] = 1
+    # Determine method: prefer explicit method key, else fall back to is_binary boolean
+    method = raw.get('method')
+    if method is None and 'is_binary' in raw:
+        method = 'logistic' if raw.get('is_binary') else 'Gaussian'
+    if method is not None:
+        # Canonicalize method spelling
+        mlow = str(method).lower()
+        if mlow in { 'gaussian', 'g', 'cont', 'continuous'}:
+            method = 'Gaussian'
+        elif mlow in { 'logistic', 'bin', 'binary'}:
+            method = 'logistic'
+        norm['method'] = method
+    # Fill remaining untouched keys (preserve originals for downstream options)
+    for k, v in raw.items():
+        if k in {'target_column_index','is_binary','method','imputation_trials','M','mvar'}:
+            continue
+        norm.setdefault(k, v)
+    # Replace config reference with normalized dict
+    config = norm
+    # Extract normalized required params
+    M = config.get('M')
+    mvar = config.get('mvar')
+    method = config.get('method')
     if M is None or mvar is None or method is None:
-        raise ValueError("Missing required parameters in config: M, mvar, or method")
+        raise ValueError(f"Missing required parameters after normalization: M={M} mvar={mvar} method={method}")
     # Use provided websockets if available
     global remote_websockets
     if websockets is not None:
@@ -266,6 +306,31 @@ async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: 
     
     # Send method to all remote sites and gather their contributions
     # Process one site at a time for a more synchronous pattern
+    async def _read_vector_strict(ws: WebSocket) -> np.ndarray:
+        """Read next numeric vector; skip stray string envelopes (e.g., 'ping', \n or empty) transparently.
+        If a non-vector non-string envelope arrives, raise immediately.
+        """
+        while True:
+            txt = await ws.receive_text()
+            env = Envelope.from_json(txt)
+            if env.cmd == Cmd.ERR:
+                raise ValueError(env.error or "Protocol error")
+            if env.obj == Obj.STR and env.dtype == DType.UTF8:
+                # Skip benign string control messages
+                if env.text and env.text.lower() not in ("ping", "pong"):
+                    print(f"[si_central_ls] Skipping unexpected STR '{env.text}' while awaiting numeric vector")
+                continue
+            if env.obj == Obj.VEC and env.dtype == DType.FLOAT64:
+                if env.payload is None or env.rows is None:
+                    raise ValueError("Missing payload for numeric vector")
+                raw = Envelope._b64_decode(env.payload) if hasattr(Envelope, '_b64_decode') else None  # fallback to original path
+            # Fallback: reuse read_vector if not our manual parse
+                import base64, numpy as _np
+                raw = base64.b64decode(env.payload)
+                arr = _np.frombuffer(raw, dtype=_np.float64, count=env.rows)
+                return arr
+            raise ValueError(f"Unexpected envelope while awaiting vector: {env.obj}/{env.dtype}")
+
     for site_id in site_ids:
         # Acquire lock for this site to ensure sequential access
         async with site_locks[site_id]:
@@ -275,19 +340,19 @@ async def si_central_ls(X: np.ndarray, y: np.ndarray, site_ids: List[str], lam: 
             await write_string("Gaussian", ws)
             
             # Receive sample size
-            remote_n = await read_vector(ws)
+            remote_n = await _read_vector_strict(ws)
             n += int(remote_n[0])
             
             # Receive matrix XX
-            remote_XX = await read_matrix(ws)
+            remote_XX = await read_matrix(ws)  # matrix path remains strict; if ping arrives here protocol truly desynced
             XX += remote_XX
             
             # Receive vector Xy
-            remote_Xy = await read_vector(ws)
+            remote_Xy = await _read_vector_strict(ws)
             Xy += remote_Xy
             
             # Receive scalar yy
-            remote_yy = await read_vector(ws)
+            remote_yy = await _read_vector_strict(ws)
             yy += remote_yy[0]
             
             print(f"Received data from site {site_id}: n={int(remote_n[0])}, XX shape={remote_XX.shape}")

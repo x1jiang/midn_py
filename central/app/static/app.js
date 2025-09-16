@@ -145,6 +145,24 @@ document.addEventListener('DOMContentLoaded', () => {
     
   // Function to start job monitoring
   function startJobMonitoring(jobId) {
+    // Always ensure UI shows running state when (re)starting monitoring
+    if (typeof ensureRunningStatus === 'function') {
+      ensureRunningStatus();
+    }
+    // Skip only if same jobId AND an active interval is still running
+    if (window._jobMonitoring && window._jobMonitoring.jobId == jobId && window._jobMonitoring.interval) {
+      console.log('[monitor] Already actively monitoring job', jobId, '— skipping re-init');
+      return;
+    }
+    // If a previous monitoring interval exists for a different job, clear it
+    try {
+      if (window._jobMonitoring && window._jobMonitoring.interval) {
+        clearInterval(window._jobMonitoring.interval);
+        window._jobMonitoring = null;
+        console.log('[monitor] Cleared previous polling interval before starting new monitoring');
+      }
+    } catch (e) { console.warn('Failed clearing previous monitoring interval', e); }
+
     // Explicitly set the global job running flag
     window.jobIsRunning = true;
     window.activeJobId = jobId;
@@ -155,6 +173,16 @@ document.addEventListener('DOMContentLoaded', () => {
     // Set up job status display
     const statusContainer = document.getElementById('job-status-messages');
     const statusIndicator = document.getElementById('job-status-indicator');
+    // If previous run ended (completed/failed/cancelled), clear old messages before new monitoring
+    // Clear previous run UI if prior job ended OR was in a transient stopping state
+    if (statusIndicator && /(status-completed|status-failed|status-cancelled|status-stopping)/.test(statusIndicator.className)) {
+      console.log('[monitor] Clearing previous run UI state before starting new monitoring');
+      if (typeof resetJobStatusUI === 'function') {
+        resetJobStatusUI();
+      } else if (statusContainer) {
+        statusContainer.innerHTML = '';
+      }
+    }
     const stopButton = document.getElementById('stop-job-btn');
     
     // Make sure containers and buttons are visible
@@ -166,6 +194,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (stopButton) {
       stopButton.classList.remove('hidden');
       stopButton.disabled = false;
+      // Ensure stale 'Stopping...' state from prior run is cleared
+      if (stopButton.textContent !== 'Stop') stopButton.textContent = 'Stop';
+      if (stopButton.dataset.stopping) delete stopButton.dataset.stopping;
     }
     
     // Display job ID in the status area
@@ -180,7 +211,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function monitorJobStatus(jobId) {
     const statusContainer = document.getElementById('job-status-messages');
     const statusIndicator = document.getElementById('job-status-indicator');
-    const stopButton = document.getElementById('stop-job-btn');
+    let stopButton = document.getElementById('stop-job-btn');
     
     let lastMessageCount = 0;
     let isCompleted = false;
@@ -195,6 +226,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         const data = await response.json();
+        // Normalize cancelled condition: backend may set error === 'cancelled' instead of a cancelled flag
+        if (data && data.error === 'cancelled' && !data.cancelled) {
+          data.cancelled = true;
+        }
         
         // Update status messages
         if (data.messages && data.messages.length > lastMessageCount) {
@@ -214,7 +249,19 @@ document.addEventListener('DOMContentLoaded', () => {
         // Update status indicator
         if (data.completed) {
           isCompleted = true;
-          if (data.error) {
+          if (data.cancelled) {
+            statusIndicator.textContent = 'Cancelled';
+            statusIndicator.className = 'status-running status-cancelled';
+            updateJobStatusInTable(jobId, 'Cancelled');
+            // Stop polling and clean up
+            clearInterval(pollingInterval);
+            try { if (window._jobMonitoring && window._jobMonitoring.interval === pollingInterval) { window._jobMonitoring = null; } } catch(_){}
+            enableJobStartButton();
+            window.jobIsRunning = false;
+            if (stopButton) { stopButton.disabled = true; }
+            if (stopButton) { stopButton.classList.add('hidden'); }
+            return; // Skip further completed logic
+          } else if (data.error) {
             statusIndicator.textContent = 'Failed';
             statusIndicator.className = 'status-running status-failed';
           } else {
@@ -261,12 +308,11 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           
           // Disable stop button
-          if (stopButton) {
-            stopButton.disabled = true;
-          }
+          if (stopButton) { stopButton.disabled = true; }
           
           // Stop polling
           clearInterval(pollingInterval);
+          try { if (window._jobMonitoring && window._jobMonitoring.interval === pollingInterval) { window._jobMonitoring = null; } } catch(_){}
           
           // Re-enable job submit button after completion
           enableJobStartButton();
@@ -279,15 +325,35 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     };
     
-    // Set up stop button handler
+    // Set up stop button handler (ensure only ONE listener by cloning button to remove prior listeners)
     if (stopButton) {
+      if (!stopButton.dataset.boundListener) {
+        // First time binding on this load
+        stopButton.dataset.boundListener = '1';
+      } else {
+        // Already had listeners from earlier monitor invocation; replace node to drop them
+        const cloned = stopButton.cloneNode(true);
+        stopButton.parentNode.replaceChild(cloned, stopButton);
+        stopButton = cloned; // update local reference
+        console.log('[monitor] Replaced stop button to remove duplicate listeners');
+      }
       stopButton.addEventListener('click', async () => {
+        // Guard: if already processing stop, ignore further clicks
+        if (stopButton.dataset.stopping === '1') {
+            return;
+        }
         if (confirm('Are you sure you want to stop this job?')) {
           try {
-            // Get the CSRF token from the meta tag
+            stopButton.dataset.stopping = '1';
+            // Visual feedback immediately
+            stopButton.disabled = true;
+            stopButton.textContent = 'Stopping...';
+            if (statusIndicator) {
+              statusIndicator.textContent = 'Stopping...';
+              statusIndicator.className = 'status-running status-stopping';
+            }
             const csrfMeta = document.querySelector('meta[name="csrf-token"]');
             const csrfToken = csrfMeta ? csrfMeta.getAttribute('content') : '';
-            
             const response = await fetch(`/api/jobs/stop/${jobId}`, {
               method: 'POST',
               headers: {
@@ -295,22 +361,46 @@ document.addEventListener('DOMContentLoaded', () => {
                 'X-CSRF-Token': csrfToken
               }
             });
-            
             if (response.ok) {
-              // Add a message about stopping
               const messageEl = document.createElement('div');
               messageEl.className = 'job-status-line';
               messageEl.textContent = 'Stop request sent';
               statusContainer.appendChild(messageEl);
-              
-              // Disable the button to prevent multiple clicks
-              stopButton.disabled = true;
+              // Immediately poll a few times faster (every 500ms) until completed/cancelled detected
+              if (window._jobMonitoring && window._jobMonitoring.interval) {
+                clearInterval(window._jobMonitoring.interval);
+              }
+              let fastPolls = 8; // ~4 seconds fast polling max
+              const fastInterval = setInterval(async () => {
+                await updateJobStatus();
+                fastPolls--;
+                if (fastPolls <= 0 || isCompleted) {
+                  clearInterval(fastInterval);
+                  // If completed during fast polling, null monitor to allow re-init
+                  if (isCompleted) {
+                    try { if (window._jobMonitoring && window._jobMonitoring.interval === fastInterval) { window._jobMonitoring = null; } } catch(_){}
+                  }
+                  if (!isCompleted) {
+                    // Resume normal polling
+                    const resumed = setInterval(updateJobStatus, 2000);
+                    window._jobMonitoring = { interval: resumed, jobId };
+                  }
+                }
+              }, 500);
+              window._jobMonitoring = { interval: fastInterval, jobId };
             } else {
               alert('Failed to stop job');
+              // allow retry
+              stopButton.disabled = false;
+              stopButton.textContent = 'Stop';
+              stopButton.dataset.stopping = '0';
             }
           } catch (error) {
             console.error('Error stopping job:', error);
             alert('Error stopping job: ' + error.message);
+            stopButton.disabled = false;
+            stopButton.textContent = 'Stop';
+            stopButton.dataset.stopping = '0';
           }
         }
       });
@@ -321,6 +411,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Poll for updates every 2 seconds
     pollingInterval = setInterval(updateJobStatus, 2000);
+    // Store globally so we can clear if monitoring restarted
+    window._jobMonitoring = { interval: pollingInterval, jobId };
   }
   
   // Helper function to disable job start button
@@ -440,6 +532,45 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log("Set window.jobIsRunning to false");
   }
   
+  // Helper to fully reset the job status UI before starting a new job
+  function resetJobStatusUI() {
+    const jobStatusContainer = document.getElementById('job-status-container');
+    const statusMessagesContainer = document.getElementById('job-status-messages');
+    const statusIndicator = document.getElementById('job-status-indicator');
+    const stopButton = document.getElementById('stop-job-btn');
+    const existingDownload = document.getElementById('download-results-btn');
+    
+    // Remove any existing download button from previous run
+    if (existingDownload && existingDownload.parentNode) {
+      existingDownload.parentNode.removeChild(existingDownload);
+    }
+    
+    if (statusMessagesContainer) {
+      statusMessagesContainer.innerHTML = '';
+      const initEl = document.createElement('div');
+      initEl.className = 'job-status-line';
+      initEl.textContent = 'Initializing job...';
+      statusMessagesContainer.appendChild(initEl);
+    }
+    if (statusIndicator) {
+      statusIndicator.textContent = 'Running';
+      statusIndicator.className = 'status-running';
+    }
+    if (stopButton) {
+      stopButton.disabled = false;
+      stopButton.classList.remove('hidden');
+      // Reset any leftover state from a previous cancellation attempt
+      stopButton.textContent = 'Stop';
+      if (stopButton.dataset.stopping) delete stopButton.dataset.stopping;
+    }
+    if (jobStatusContainer) {
+      jobStatusContainer.classList.remove('hidden');
+      // Reset header text; actual job id will be set later when monitoring starts
+      const h2 = jobStatusContainer.querySelector('h2');
+      if (h2) h2.textContent = 'Job Status';
+    }
+  }
+  
   // Function to update job status in the jobs table
   function updateJobStatusInTable(jobId, status) {
     // Check if we're on the jobs page with a table
@@ -534,11 +665,11 @@ document.addEventListener('DOMContentLoaded', () => {
           statusMessagesContainer.innerHTML = '';
           const messageEl = document.createElement('div');
           messageEl.className = 'job-status-line';
-          messageEl.textContent = 'Error: A job is already running. You must stop it before starting a new job.';
+          messageEl.textContent = 'A job is already running. You must stop it (or wait for completion) before starting a new one.';
           statusMessagesContainer.appendChild(messageEl);
           if (statusIndicator) {
-            statusIndicator.textContent = 'Failed';
-            statusIndicator.className = 'status-running status-failed';
+            statusIndicator.textContent = 'Running';
+            statusIndicator.className = 'status-running';
           }
         }
         return;
@@ -574,11 +705,11 @@ document.addEventListener('DOMContentLoaded', () => {
               statusMessagesContainer.innerHTML = '';
               const messageEl = document.createElement('div');
               messageEl.className = 'job-status-line';
-              messageEl.textContent = 'Error: A job is already running. You must stop it before starting a new job.';
+              messageEl.textContent = 'A job is already running. You must stop it (or wait for completion) before starting a new one.';
               statusMessagesContainer.appendChild(messageEl);
               if (statusIndicator) {
-                statusIndicator.textContent = 'Failed';
-                statusIndicator.className = 'status-running status-failed';
+                statusIndicator.textContent = 'Running';
+                statusIndicator.className = 'status-running';
               }
             }
           } else {
@@ -603,6 +734,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Function to start job without form submission (to preserve file selection)
   function startJobWithoutSubmit(form) {
     const formData = new FormData(form);
+    // Reset UI so previous completed job artifacts (messages / download button) are cleared
+    resetJobStatusUI();
+    if (typeof ensureRunningStatus === 'function') ensureRunningStatus();
     
     fetch('/gui/jobs/start', {
       method: 'POST',
@@ -620,10 +754,12 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           
           // Start monitoring the job
-          startJobMonitoring(jobId);
+          // Prefer querying server for the authoritative running job id (handles backend remapping / generated ids)
+          fetchAndMonitorRunningJob(jobId);
           
           // Disable submit button but keep file input enabled
           disableJobStartButton();
+          if (typeof ensureRunningStatus === 'function') ensureRunningStatus();
         }
       } else {
         throw new Error('Failed to start job');
@@ -641,6 +777,48 @@ document.addEventListener('DOMContentLoaded', () => {
         submitButton.textContent = 'Start';
       }
     });
+  }
+
+  // Helper: fetch currently running job id with small retry window then monitor
+  async function fetchAndMonitorRunningJob(fallbackJobId) {
+    const maxAttempts = 4; // initial + 3 retries
+    let attempt = 0;
+    const delay = (ms) => new Promise(res => setTimeout(res, ms));
+    while (attempt < maxAttempts) {
+      try {
+        const resp = await fetch('/test/job-check');
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.running_job_id) {
+            if (data.running_job_id !== fallbackJobId) {
+              console.log('[monitor] Server reported running_job_id', data.running_job_id, 'different from form job id', fallbackJobId);
+            } else {
+              console.log('[monitor] Confirmed running job id', data.running_job_id);
+            }
+            startJobMonitoring(data.running_job_id);
+            return;
+          }
+        } else {
+          console.warn('fetchAndMonitorRunningJob: non-OK status', resp.status);
+        }
+      } catch (e) {
+        console.warn('fetchAndMonitorRunningJob attempt error', e);
+      }
+      attempt++;
+      await delay(400 * attempt); // incremental backoff
+    }
+    // Fallback if server never reflected running job id
+    console.warn('[monitor] Falling back to provided job id after retries', fallbackJobId);
+    if (fallbackJobId) startJobMonitoring(fallbackJobId);
+  }
+
+  // Ensure status indicator reflects an actively running job (clears stale failure/cancel text)
+  function ensureRunningStatus() {
+    const statusIndicator = document.getElementById('job-status-indicator');
+    if (statusIndicator) {
+      statusIndicator.textContent = 'Running';
+      statusIndicator.className = 'status-running';
+    }
   }
   
   // Job selection functionality - for displaying parameters on job selection
@@ -722,12 +900,10 @@ document.addEventListener('DOMContentLoaded', () => {
         orderedKeys.forEach(key => {
           if (!(key in job.parameters)) return; // safety
           const value = job.parameters[key];
-          // Friendly label adjustments
+          // Friendly label adjustments (SIMICE now standardizes on is_binary_list)
           let labelKey = key;
-          if (job.algorithm && job.algorithm.toUpperCase() === 'SIMICE') {
-            if (key === 'is_binary' || key === 'is_binary_list') {
-              labelKey = 'is_binary'; // unify display
-            }
+          if (job.algorithm && job.algorithm.toUpperCase() === 'SIMICE' && key === 'is_binary_list') {
+            labelKey = 'is_binary_list';
           }
           const formattedKey = labelKey
             .replace(/_/g, ' ')

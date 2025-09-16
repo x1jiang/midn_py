@@ -753,29 +753,39 @@ function stopCurrentJob() {
             const resultMessageEl = document.createElement('div');
             resultMessageEl.className = 'job-status-line';
             if (data.success) {
-                resultMessageEl.textContent = 'Job stopped successfully.';
+                // Show termination detail if present
+                if (data.termination) {
+                    const term = data.termination;
+                    let detail = `Job stopped successfully.`;
+                    if (term.sent_term) detail += ' (SIGTERM sent)';
+                    if (term.sent_kill) detail += ' (SIGKILL sent)';
+                    if (term.alive_after === false) {
+                        detail += ' Process exited.';
+                    } else if (term.alive_after === true) {
+                        detail += ' WARNING: Process may still be alive.';
+                    }
+                    resultMessageEl.textContent = detail;
+                } else if (data.already_completed) {
+                    resultMessageEl.textContent = 'Job already completed.';
+                } else {
+                    resultMessageEl.textContent = 'Job stopped successfully.';
+                }
                 if (pollingInterval) clearInterval(pollingInterval);
-                
                 if (stopButton) {
                     stopButton.classList.add('hidden');
                 }
-
                 const statusIndicator = document.getElementById('status-indicator');
                 statusIndicator.textContent = 'Stopped';
                 statusIndicator.className = 'status-indicator completed';
-                
                 // Re-enable all job forms
                 enableAllJobSubmitButtons();
             } else {
                 resultMessageEl.textContent = `Error stopping job: ${data.error}`;
-                // Re-enable the button if the stop failed
                 if (stopButton) {
                     stopButton.disabled = false;
                 }
             }
             statusContainer.appendChild(resultMessageEl);
-            
-            // Auto-scroll to the latest messages
             const messagesContainer = document.getElementById('status-messages-container');
             if(messagesContainer) {
                 messagesContainer.scrollTop = messagesContainer.scrollHeight;
@@ -783,13 +793,10 @@ function stopCurrentJob() {
         })
         .catch(error => {
             console.error('Error stopping job:', error);
-            
             const errorMsgEl = document.createElement('div');
             errorMsgEl.className = 'job-status-line';
             errorMsgEl.textContent = `Error stopping job: ${error.message}`;
             statusContainer.appendChild(errorMsgEl);
-            
-            // Re-enable the button if the stop failed
             if (stopButton) {
                 stopButton.disabled = false;
             }

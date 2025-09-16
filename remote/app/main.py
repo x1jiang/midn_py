@@ -11,8 +11,8 @@ from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 from pathlib import Path
 import os
-import multiprocessing
 import sys
+import traceback
 
 from . import config
 from .custom_templates import templates
@@ -27,18 +27,7 @@ app.mount("/static", StaticFiles(directory="remote/app/static"), name="static")
 app.include_router(jobs_routes.router)
 
 # ---- Child-process launchers to avoid nested event loop issues ----
-def _launch_simi_remote(data_path: str, central_host: str, central_port: int, site_id: str, remote_port: int, cfg: Dict[str, Any]):
-    # Ensure MIDN_R_PY is on sys.path in the child process
-    sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
-    import importlib
-    mod = importlib.import_module("SIMI.SIMIRemote")
-    mod.run_remote_client(data_path, central_host, central_port, site_id, remote_port, cfg)
-
-def _launch_simice_remote(data_path: str, central_host: str, central_port: int, site_id: str, remote_port: int, cfg: Dict[str, Any]):
-    sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
-    import importlib
-    mod = importlib.import_module("SIMICE.SIMICERemote")
-    mod.run_remote_client(data_path, central_host, central_port, site_id, remote_port, cfg)
+# Legacy process launch helpers removed; async tasks are now always used.
 
 def _token_expiry_str(token: str | None) -> str | None:
     if not token:
@@ -520,30 +509,29 @@ async def start_job(
 
         # Build config for algorithms similar to run_imputation.py
         algo = (job_details.get("algorithm") if job_details else job_type or "SIMI").upper()
+        task = None  # async task handle
         if algo == "SIMICE":
-            # Pull from job params or form
-            target_column_indexes: List[int] = (job_details.get("parameters", {}).get("target_column_indexes") if job_details else [mvar]) or [mvar]
-            is_binary_list: List[bool] = (job_details.get("parameters", {}).get("is_binary") if job_details else [False]) or [False]
-            iter0 = iteration_before_first_imputation if iteration_before_first_imputation is not None else job_details.get("parameters", {}).get("iteration_before_first_imputation") if job_details else None
-            iterv = iteration_between_imputations if iteration_between_imputations is not None else job_details.get("parameters", {}).get("iteration_between_imputations") if job_details else None
+            params = (job_details or {}).get("parameters", {}) if job_details else {}
+            target_column_indexes: List[int] = params.get("target_column_indexes") or [mvar]
+            is_binary_list: List[bool] = params.get("is_binary_list") or [False]
+            iter0 = iteration_before_first_imputation if iteration_before_first_imputation is not None else params.get("iteration_before_first_imputation")
+            iterv = iteration_between_imputations if iteration_between_imputations is not None else params.get("iteration_between_imputations")
             algo_config: Dict[str, Any] = {
                 "type_list": ["binary" if b else "gaussian" for b in is_binary_list],
                 "iter0_val": int(iter0) if iter0 is not None else 5,
                 "iter_val": int(iterv) if iterv is not None else 5,
                 "target_column_indexes": target_column_indexes,
-                "is_binary": is_binary_list,
+                "is_binary_list": is_binary_list,
                 "job_id": job_id,
                 "site_id": active_site.SITE_ID,
             }
-            print(f"Starting SIMICE remote client process host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
-            # Spawn separate process to avoid nested event loop issues
-            proc = multiprocessing.Process(target=_launch_simice_remote, args=(str(data_path), central_host, central_port, active_site.SITE_ID, remote_port, algo_config))
-            proc.start()
-            child_pid = proc.pid
+            print(f"Starting SIMICE remote client async task host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
+            import importlib
+            async_mod = importlib.import_module("SIMICE.SIMICERemote")
+            task = asyncio.create_task(async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, algo_config))
+            child_pid = None
         else:
-            # SIMI
             method = "logistic" if is_binary else "gaussian"
-            # HIGHLIGHT: SIMIRemote expects 1-based mvar in its config (it converts to 0-based internally)
             algo_config: Dict[str, Any] = {
                 "M": 1,
                 "mvar": mvar_index + 1,
@@ -551,11 +539,12 @@ async def start_job(
                 "job_id": job_id,
                 "site_id": active_site.SITE_ID,
             }
-            print(f"Starting SIMI remote client process host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
-            proc = multiprocessing.Process(target=_launch_simi_remote, args=(str(data_path), central_host, central_port, active_site.SITE_ID, remote_port, algo_config))
-            proc.start()
-            child_pid = proc.pid
-        
+            print(f"Starting SIMI remote client async task host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
+            import importlib
+            async_mod = importlib.import_module("SIMI.SIMIRemote")
+            task = asyncio.create_task(async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, algo_config))
+            child_pid = None
+
         print("Job started successfully")
         
         # DEBUG: Check request.app.state before job registration
@@ -585,11 +574,42 @@ async def start_job(
             'messages': ['Job started successfully'],
             'start_time': datetime.now(),
             'completed': False,
+            'end_time': None,
             'site_id': active_site.SITE_ID,  # Store site ID with the job
             'data_path': str(data_path),
             'remote_port': remote_port,
-            'pid': child_pid
+            'pid': child_pid,
+            'async': True,
+            'task': task
         }
+
+        # Attach lifecycle callback
+        def _task_done_cb(t: asyncio.Task, _app=app, _site_id=active_site.SITE_ID, _job_id=job_id):
+            try:
+                site_jobs_attr_inner = f'running_jobs_{_site_id}'
+                if not hasattr(_app.state, site_jobs_attr_inner):
+                    return
+                jobs_dict = getattr(_app.state, site_jobs_attr_inner)
+                job_entry = jobs_dict.get(_job_id)
+                if not job_entry:
+                    return
+                job_entry['end_time'] = datetime.now()
+                if t.cancelled():
+                    job_entry['status'] = 'Cancelled'
+                    job_entry['messages'].append('Task was cancelled')
+                else:
+                    exc = t.exception()
+                    if exc:
+                        job_entry['status'] = 'Error'
+                        job_entry['messages'].append(f"Task error: {exc}")
+                        job_entry['traceback'] = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                    else:
+                        job_entry['status'] = 'Completed'
+                        job_entry['messages'].append('Task completed successfully')
+                job_entry['completed'] = job_entry['status'] in ('Cancelled', 'Completed') or job_entry['status'] == 'Error'
+            except Exception as cb_e:
+                print(f"Error in task done callback for job {_job_id}: {cb_e}")
+        task.add_done_callback(_task_done_cb)
         
         # Log for debugging job isolation
         print(f"🔄 Job {job_id} registered in request.app.state for site {active_site.SITE_ID}")
@@ -619,3 +639,58 @@ async def start_job(
                 "request": request, 
                 "error": f"Error starting job: {str(e)}"
             })
+
+@app.post("/cancel_job")
+async def cancel_job(request: Request, job_id: int = Form(...), site_id: Optional[str] = Form(None), site_index: Optional[int] = Form(0)):
+    """Cancel a running job by job_id for a specific site.
+    Resolution rules:
+      1. If site_id provided use it.
+      2. Else derive from site_index active site config.
+    Returns JSON with cancellation status (for AJAX) or simple dict.
+    """
+    # Derive active site if site_id not provided
+    resolved_site_id = site_id
+    if not resolved_site_id:
+        if 0 <= (site_index or 0) < len(config.settings.sites):
+            resolved_site_id = config.settings.sites[site_index].SITE_ID
+    if not resolved_site_id:
+        return {"success": False, "error": "No site_id provided and unable to resolve from site_index"}
+
+    site_jobs_attr = f'running_jobs_{resolved_site_id}'
+    if not hasattr(request.app.state, site_jobs_attr):
+        return {"success": False, "error": f"No jobs found for site {resolved_site_id}"}
+    jobs_dict = getattr(request.app.state, site_jobs_attr)
+    job_entry = jobs_dict.get(job_id)
+    if not job_entry:
+        return {"success": False, "error": f"Job {job_id} not found for site {resolved_site_id}"}
+    if job_entry.get('completed'):
+        return {"success": True, "message": f"Job {job_id} already {job_entry.get('status')}"}
+    task: asyncio.Task | None = job_entry.get('task')
+    if task is None:
+        return {"success": False, "error": "No task handle available to cancel"}
+    # Set status to Cancelling prior to actual cancellation
+    job_entry['status'] = 'Cancelling'
+    job_entry['messages'].append('Cancellation requested')
+    try:
+        cancelled = task.cancel()
+        # Optionally give event loop a chance to process cancellation
+        await asyncio.sleep(0)  # yield control
+        return {"success": True, "job_id": job_id, "site_id": resolved_site_id, "cancelled": cancelled}
+    except Exception as e:
+        return {"success": False, "error": f"Error attempting cancellation: {e}"}
+
+@app.get("/job_status")
+async def job_status(job_id: int, site_id: str):
+    """Retrieve current status for a job (polling helper)."""
+    site_jobs_attr = f'running_jobs_{site_id}'
+    if not hasattr(app.state, site_jobs_attr):
+        return {"success": False, "error": f"No jobs tracked for site {site_id}"}
+    jobs_dict = getattr(app.state, site_jobs_attr)
+    job_entry = jobs_dict.get(job_id)
+    if not job_entry:
+        return {"success": False, "error": f"Job {job_id} not found for site {site_id}"}
+    # Serialize datetime objects
+    def _ser_dt(v):
+        return v.isoformat() if isinstance(v, datetime) else v
+    serialized = {k: _ser_dt(v) for k, v in job_entry.items() if k != 'task'}
+    return {"success": True, "job": serialized}

@@ -20,7 +20,6 @@ from . import models, schemas, services
 from .db import get_db, engine
 from .core.config import settings
 from .core.alg_config import load_all_algorithm_schemas, validate_parameters
-from .core.alg_runtime import build_runtime_config
 from .core.csrf import get_csrf_token, gen_csrf_token, CSRF_COOKIE
 from .api import users as sites_api, jobs, remote as remote_api
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -29,20 +28,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 models.Base.metadata.create_all(bind=engine)
 
-# Startup migration: normalize legacy SIMICE 'is_binary' list key to 'is_binary_list'
-try:  # non-critical
-    from .db import SessionLocal  # type: ignore
-    with SessionLocal() as _m:  # type: ignore
-        jobs_fix = _m.query(models.Job).filter(models.Job.algorithm == "SIMICE").all()  # type: ignore
-        changed = False
-        for j in jobs_fix:
-            if isinstance(j.parameters, dict) and "is_binary_list" not in j.parameters and isinstance(j.parameters.get("is_binary"), list):
-                j.parameters["is_binary_list"] = j.parameters.pop("is_binary")
-                changed = True
-        if changed:
-            _m.commit()
-except Exception:
-    pass
+"""All SIMICE jobs now store multi-column binary flags under 'is_binary_list'.
+Legacy automatic migration from 'is_binary' removed (schema updated). Re-create
+old jobs if they referenced the deprecated key."""
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,6 +52,11 @@ templates = Jinja2Templates(directory="central/app/templates")
 
 # Helper: order parameters according to algorithm schema ui:order (similar to create_job rendering)
 def _order_parameters(algo: str, params: Dict[str, Any] | None) -> Dict[str, Any]:
+    """Return parameters ordered according to the algorithm schema ui:order.
+
+    Previous compatibility that aliased SIMICE 'is_binary' -> 'is_binary_list' removed.
+    Jobs must already use 'is_binary_list'. We keep keys exactly as stored.
+    """
     if not params:
         return {}
     schemas = load_all_algorithm_schemas()
@@ -73,33 +66,15 @@ def _order_parameters(algo: str, params: Dict[str, Any] | None) -> Dict[str, Any
     order = schema.get('ui:order') or []
     if not isinstance(order, list) or not order:
         return params
-    # Alias map to reconcile stored param names with schema names
-    # SIMICE historically stored list under is_binary_list while schema uses is_binary
-    alias_map: Dict[str, str] = {}
-    if algo.upper() == 'SIMICE':
-        # Always map schema key is_binary to storage key is_binary_list if latter exists
-        if 'is_binary_list' in params:
-            alias_map['is_binary'] = 'is_binary_list'
     ordered: Dict[str, Any] = {}
-    seen_storage_keys: Set[str] = set()
-    # Add in declared order first, resolving aliases
-    for schema_key in order:
-        storage_key = alias_map.get(schema_key, schema_key)
-        if storage_key in params:
-            ordered[schema_key] = params[storage_key]
-            seen_storage_keys.add(storage_key)
-    # Append any remaining original keys (that weren't mapped) deterministically (alphabetical by their display/storage key)
-    for storage_key in sorted(params.keys()):
-        if storage_key not in seen_storage_keys:
-            # Use schema-style key if reverse alias matches, else storage key
-            reverse_key = None
-            for k, v in alias_map.items():
-                if v == storage_key:
-                    reverse_key = k
-                    break
-            display_key = reverse_key or storage_key
-            if display_key not in ordered:
-                ordered[display_key] = params[storage_key]
+    seen: Set[str] = set()
+    for key in order:
+        if key in params:
+            ordered[key] = params[key]
+            seen.add(key)
+    for k in sorted(params.keys()):
+        if k not in seen:
+            ordered[k] = params[k]
     print(f"_order_parameters algo={algo} order={order} input_keys={list(params.keys())} ordered_keys={list(ordered.keys())}")
     return ordered
 
@@ -121,6 +96,8 @@ expected_sites: Optional[Set[str]] = None
 all_sites_connected = asyncio.Event()
 imputation_running = asyncio.Event()
 jobs_runtime: Dict[int, Dict[str, Any]] = {}
+# Track asyncio Task objects for running jobs so we can cancel them
+job_tasks: Dict[int, asyncio.Task] = {}
 # Store results under the publicly served static directory so they can be accessed if needed
 # Path: central/app/static/results (user requirement: central/static/results; project layout uses app/static)
 RESULTS_DIR = Path(__file__).resolve().parent / "static" / "results"
@@ -160,7 +137,16 @@ async def debug_send_updates(job_id: int):
 def _set_expected_sites(sites: List[str]):
     global expected_sites
     expected_sites = set(sites)
+    # Clear first (fresh wait state) then immediately evaluate current connections
     all_sites_connected.clear()
+    try:
+        if expected_sites and expected_sites.issubset(set(remote_websockets.keys())):
+            # All required sites already connected (they connected before job start)
+            all_sites_connected.set()
+            logger.info(f"All expected sites already connected: {sorted(expected_sites)}; proceeding without additional waits.")
+    except Exception as e:
+        # Non-critical safeguard; failure here should not block job start
+        logger.warning(f"_set_expected_sites early evaluation error: {e}")
 
 @app.websocket("/ws/{site_id}")
 async def websocket_endpoint(websocket: WebSocket, site_id: str):
@@ -376,14 +362,8 @@ async def gui_jobs_start_get(request: Request, db: Session = Depends(get_db)):
             "parameters": {},
         }
         if job.parameters:
-            # Normalize legacy SIMICE naming then apply schema ordering
-            normalized = dict(job.parameters)
-            if job.algorithm == "SIMICE" and "is_binary" in normalized and "is_binary_list" not in normalized and isinstance(normalized.get("is_binary"), list):
-                normalized["is_binary_list"] = normalized.pop("is_binary")
-            # Apply schema ui:order
-            ordered_schema = _order_parameters(job.algorithm, normalized)
+            ordered_schema = _order_parameters(job.algorithm, dict(job.parameters))
             job_dict["parameters"] = ordered_schema
-            # Preserve explicit order for frontend (list of keys in insertion order)
             job_dict["param_order"] = list(ordered_schema.keys())
         # include owner id per job and append within loop so all jobs retained
         job_dict["owner_id"] = job.owner_id
@@ -428,10 +408,7 @@ async def gui_jobs_start_post(
             "parameters": {},
         }
         if job.parameters:
-            normalized = dict(job.parameters)
-            if job.algorithm == "SIMICE" and "is_binary" in normalized and "is_binary_list" not in normalized and isinstance(normalized.get("is_binary"), list):
-                normalized["is_binary_list"] = normalized.pop("is_binary")
-            ordered_schema = _order_parameters(job.algorithm, normalized)
+            ordered_schema = _order_parameters(job.algorithm, dict(job.parameters))
             job_dict["parameters"] = ordered_schema
             job_dict["param_order"] = list(ordered_schema.keys())
     # legacy iteration/imputation/missing_spec removed
@@ -450,14 +427,36 @@ async def gui_jobs_start_post(
         print(f"Starting job {job_id} with algorithm {db_job.algorithm} for sites {db_job.participants}")
         print(f"DB Job parameters: {db_job.parameters}")
         
-        # Build base config from stored parameters then normalize per algorithm expectations
+        # Build base config from stored parameters; pass raw to algorithm modules
         raw_params: Dict[str, Any] = dict(db_job.parameters or {})
-        config = build_runtime_config(algorithm_name, db_job)
-        print(f"Runtime config constructed ({algorithm_name}): {config}")
+        # Pass raw parameters directly; algorithm modules will handle any normalization
+        config = raw_params
+        print(f"Passing raw parameters to algorithm ({algorithm_name}): {config}")
         # participants hold site IDs
         site_ids: List[str] = list(db_job.participants or [])
         # prepare numpy matrix
-        D = central_data.values
+        # Coerce to float64 early; if non-numeric columns exist, attempt conversion and raise clear error
+        try:
+            # Identify object / string dtypes and attempt to coerce
+            non_numeric_cols = []
+            for c in central_data.columns:
+                if central_data[c].dtype == object:
+                    non_numeric_cols.append(c)
+            if non_numeric_cols:
+                coercion_errors: List[str] = []
+                for c in non_numeric_cols:
+                    try:
+                        central_data[c] = pd.to_numeric(central_data[c], errors='raise')
+                    except Exception as ce:  # keep original for debugging
+                        coercion_errors.append(f"{c}: {ce}")
+                if coercion_errors:
+                    return templates.TemplateResponse("confirm.html", {"request": request, "message": (
+                        "Non-numeric column(s) detected that could not be converted to numeric required for SIMICE/SIMI: "
+                        + "; ".join(coercion_errors)
+                    )})
+            D = central_data.to_numpy(dtype=float, copy=False)
+        except Exception as conv_e:
+            return templates.TemplateResponse("confirm.html", {"request": request, "message": f"Failed to coerce data to float64: {conv_e}"})
 
         # init job runtime record
         jobs_runtime[job_id] = {
@@ -470,6 +469,9 @@ async def gui_jobs_start_post(
 
         async def run_central(job_id_local: int):
             # wait for remotes
+            print(f"Job {job_id_local} waiting for remotes: {site_ids}", flush=True)
+            print( f"Currently connected remotes: {list(remote_websockets.keys())}", flush=True)
+            
             _set_expected_sites(site_ids)
             await all_sites_connected.wait()
             jobs_runtime[job_id_local]["messages"].append("All remotes connected. Starting...")
@@ -485,6 +487,7 @@ async def gui_jobs_start_post(
                     algorithm_central = importlib.import_module("SIMICE.SIMICECentral").simice_central
                 else:
                     raise ValueError(f"Unsupported algorithm {algorithm_name}")
+                # All normalization of config is deferred to the algorithm implementation
                 imputed = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets)
                 jobs_runtime[job_id_local]["messages"].append("Imputation completed.")
                 # Persist results
@@ -535,8 +538,28 @@ async def gui_jobs_start_post(
                     # For legacy frontend naming expectation
                     jobs_runtime[job_id_local]["imputed_dataset_path"] = str(zip_path)
                     jobs_runtime[job_id_local]["messages"].append(f"Results saved: {zip_path.name} (dir {job_dir_name})")
+                    # Persist path + mark completed early (best-effort) so UI tables update promptly
+                    try:
+                        from .services import job_service  # local import to avoid cycles
+                        with next(get_db()) as _db:
+                            db_job_early = job_service.get_job(_db, job_id_local)
+                            if db_job_early:
+                                db_job_early.imputed_dataset_path = str(zip_path)
+                                # Set status only if not already error/cancelled
+                                if not jobs_runtime[job_id_local].get("error") and not jobs_runtime[job_id_local].get("cancelled"):
+                                    db_job_early.status = "completed"
+                                _db.add(db_job_early)
+                                _db.commit()
+                                jobs_runtime[job_id_local]["messages"].append("Database updated with result path.")
+                    except Exception as early_db_e:
+                        jobs_runtime[job_id_local]["messages"].append(f"Early DB update failed: {early_db_e}")
                 except Exception as save_e:
                     jobs_runtime[job_id_local]["messages"].append(f"Result save error: {save_e}")
+            except asyncio.CancelledError:
+                jobs_runtime[job_id_local]["messages"].append("Job cancelled by user.")
+                jobs_runtime[job_id_local]["cancelled"] = True
+                jobs_runtime[job_id_local]["error"] = "cancelled"
+                raise
             except Exception as e:
                 jobs_runtime[job_id_local]["messages"].append(f"Error: {e}")
                 jobs_runtime[job_id_local]["error"] = str(e)
@@ -544,8 +567,25 @@ async def gui_jobs_start_post(
                 jobs_runtime[job_id_local]["completed"] = True
                 jobs_runtime[job_id_local]["running"] = False
                 imputation_running.clear()
+                # Persist status to DB (best effort)
+                try:
+                    from .services import job_service
+                    with next(get_db()) as _db:
+                        db_job_local = job_service.get_job(_db, job_id_local)
+                        if db_job_local:
+                            if jobs_runtime[job_id_local].get("cancelled"):
+                                db_job_local.status = "cancelled"
+                            elif jobs_runtime[job_id_local].get("error") and jobs_runtime[job_id_local]["error"] != "cancelled":
+                                db_job_local.status = "error"
+                            else:
+                                db_job_local.status = "completed"
+                            _db.add(db_job_local)
+                            _db.commit()
+                except Exception:
+                    pass
 
-        asyncio.create_task(run_central(job_id))
+        task = asyncio.create_task(run_central(job_id))
+        job_tasks[job_id] = task
 
         return templates.TemplateResponse("start_job.html", {
             "request": request, 
@@ -696,6 +736,51 @@ async def api_job_download(job_id: int):
         return FileResponse(str(latest), filename=latest.name, media_type="application/zip")
     logger.warning(f"Download 404 job_id={job_id} RESULTS_DIR={RESULTS_DIR} contents={[p.name for p in RESULTS_DIR.glob('*.zip')]}")
     raise HTTPException(status_code=404, detail="Result archive not found")
+
+@app.post("/api/jobs/stop/{job_id}")
+async def api_job_stop(job_id: int, request: Request):
+    """Cancel a running job.
+
+    CSRF header required (X-CSRF-Token). Middleware skips generic check for this path,
+    so we validate explicitly here to allow custom error codes.
+    """
+    token = request.headers.get("X-CSRF-Token")
+    if not token or token != get_csrf_token(request):
+        raise HTTPException(status_code=403, detail="CSRF validation failed")
+    info = jobs_runtime.get(job_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Job not found")
+    task = job_tasks.get(job_id)
+    if info.get("completed") or not task or task.done():
+        # Already finished; normalize cancelled flag if error == cancelled
+        if info.get("cancelled") and info.get("running"):
+            info["running"] = False
+        return {"detail": "Job already finished", "job": info}
+    # Mark intent immediately so UI reflects change even if task is mid-await
+    info["messages"].append("Cancellation requested by user...")
+    info["cancelled"] = True
+    info["running"] = False
+    # We set completed True so polling UI stops; backend may still be unwinding
+    info["completed"] = True
+    info["error"] = "cancelled"
+    task.cancel()
+    # Fire-and-wait briefly but don't block indefinitely
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
+    # Persist status to DB best effort
+    try:
+        from .services import job_service
+        with next(get_db()) as _db:
+            db_job_local = job_service.get_job(_db, job_id)
+            if db_job_local:
+                db_job_local.status = "cancelled"
+                _db.add(db_job_local)
+                _db.commit()
+    except Exception:
+        pass
+    return {"detail": "Job cancellation processed", "job": info}
 
 @app.get("/health")
 def read_health():

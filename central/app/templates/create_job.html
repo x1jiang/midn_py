@@ -150,8 +150,8 @@
             input.placeholder=def['ui:placeholder']||'comma separated';
             wrap.innerHTML = `<label>${labelText} (array):<br></label>`;
             wrap.appendChild(input);
-            // If SIMICE and this is is_binary, add configure button
-            if (schema.multi_column && key === 'is_binary') {
+            // If SIMICE and this is is_binary_list, add configure button
+            if (schema.multi_column && key === 'is_binary_list') {
               input.readOnly = true;
               const btn = document.createElement('button');
               btn.type = 'button';
@@ -204,7 +204,7 @@
   function openBinaryConfig(){
     const modal = document.getElementById('binary-config-modal');
     const list = document.getElementById('binary-config-list');
-    const isBinaryTextarea = document.getElementById('is_binary');
+  const isBinaryTextarea = document.getElementById('is_binary_list');
     if(!modal || !list || !isBinaryTextarea) return;
     list.innerHTML='';
     const selected = getSelectedTargetHeaders();
@@ -230,7 +230,7 @@
   function saveBinaryConfig(e){
     if(e) e.preventDefault();
     const list = document.getElementById('binary-config-list');
-    const isBinaryTextarea = document.getElementById('is_binary');
+  const isBinaryTextarea = document.getElementById('is_binary_list');
     if(!list || !isBinaryTextarea) return;
     const selects = Array.from(list.querySelectorAll('select'));
     const vals = selects.map(s=>s.value);
@@ -248,7 +248,7 @@
   document.getElementById('binary-config-save')?.addEventListener('click', saveBinaryConfig);
   // Keep is_binary length synced when headers change
   function syncIsBinaryLengths(){
-    const isBinaryTextarea = document.getElementById('is_binary');
+  const isBinaryTextarea = document.getElementById('is_binary_list');
     if(!isBinaryTextarea) return;
     const selected = getSelectedTargetHeaders();
     const existing = (isBinaryTextarea.value||'').split(',').map(s=>s.trim()).filter(s=>s.length>0);
@@ -277,7 +277,7 @@
       const algoVal = (algoSel?.value || '').toUpperCase();
       if (algoVal === 'SIMI') {
         const tci = document.getElementById('target_column_index');
-        const bin = document.getElementById('is_binary');
+  const bin = document.getElementById('is_binary');
         const trials = document.getElementById('imputation_trials');
         if (!tci || !bin || !trials) {
           // Let server validate if anything missing
@@ -303,7 +303,7 @@
         }
       } else if (algoVal === 'SIMICE') {
         const idxEl = document.getElementById('target_column_indexes');
-        const binEl = document.getElementById('is_binary');
+  const binEl = document.getElementById('is_binary_list');
         const iter0 = document.getElementById('iteration_before_first_imputation');
         const iter = document.getElementById('iteration_between_imputations');
         const trials = document.getElementById('imputation_trials');

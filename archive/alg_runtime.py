@@ -51,7 +51,7 @@ def build_runtime_config(algorithm_name: str, db_job) -> Dict[str, Any]:
         if 'type_list' in raw_params and isinstance(raw_params['type_list'], list):
             type_list = raw_params['type_list']
         else:
-            bin_list = raw_params.get('is_binary_list') or raw_params.get('is_binary')
+            bin_list = raw_params.get('is_binary_list')
             if isinstance(bin_list, list):
                 type_list = ['logistic' if b else 'Gaussian' for b in bin_list]
             elif isinstance(bin_list, bool) and mvar_list:
@@ -59,7 +59,12 @@ def build_runtime_config(algorithm_name: str, db_job) -> Dict[str, Any]:
             else:
                 type_list = []
         if type_list:
-            config['type_list'] = type_list
+            # Normalize values to canonical strings expected by algorithm
+            norm_map = {
+                'gaussian':'Gaussian','g':'Gaussian','cont':'Gaussian','continuous':'Gaussian',
+                'logistic':'logistic','bin':'logistic','binary':'logistic'
+            }
+            config['type_list'] = [norm_map.get(str(t).lower(), str(t)) for t in type_list]
         iter_val = raw_params.get('iter_val') or raw_params.get('iteration_between_imputations')
         iter0_val = raw_params.get('iter0_val') or raw_params.get('iteration_before_first_imputation')
         if iter_val is not None:
@@ -67,7 +72,8 @@ def build_runtime_config(algorithm_name: str, db_job) -> Dict[str, Any]:
         if iter0_val is not None:
             config['iter0_val'] = iter0_val
         config['M'] = (raw_params.get('M') or raw_params.get('imputation_trials') or 1)
-        skip = {'target_column_indexes','is_binary_list','is_binary','iteration_before_first_imputation','iteration_between_imputations','mvar','type_list','iter_val','iter0_val','imputation_trials','M'}
+        # Skip internal / derivative keys; legacy 'is_binary' removed
+        skip = {'target_column_indexes','is_binary_list','iteration_before_first_imputation','iteration_between_imputations','mvar','type_list','iter_val','iter0_val','imputation_trials','M'}
         for k, v in raw_params.items():
             if k in skip:
                 continue

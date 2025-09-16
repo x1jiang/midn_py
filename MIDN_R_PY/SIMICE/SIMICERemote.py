@@ -32,6 +32,28 @@ from Core.transfer import (
         WebSocketWrapper, get_wrapped_websocket
 )
 
+# Optional verbose protocol debugging (set SIMICE_DEBUG_PROTOCOL=1)
+DEBUG_PROTOCOL = os.getenv("SIMICE_DEBUG_PROTOCOL", "0") == "1"
+
+async def _read_mvar_vector_with_retry(wrapped_ws, site_id, max_retries: int = 1):
+    """Read the mvar vector, tolerating one stray string frame (mis-ordered message).
+
+    Rationale: Rare race condition observed where a STR/utf8 frame arrives
+    where the remote expects the VEC/float64 mvar vector immediately after
+    receiving the "Initialize" instruction. We swallow at most one such
+    frame and retry reading the vector to re-synchronize.
+    """
+    try:
+        return await read_vector(wrapped_ws)
+    except ValueError as e:
+        msg = str(e)
+        if "Expected VEC/float64" in msg and max_retries > 0:
+            if DEBUG_PROTOCOL:
+                print(f"[{site_id}] WARN: Expected mvar vector but got STR; attempting resync (1 retry)", flush=True)
+            # Consume (already consumed by read_vector), just retry once
+            return await read_vector(wrapped_ws)
+        raise
+
 
 async def si_remote_ls(X, y, wrapped_ws, site_id):
     """Implementation of SIRemoteLS"""
@@ -118,7 +140,9 @@ async def remote_kernel(D, central_host, central_port, site_id):
                             break
                         if inst == "Initialize":
                             try:
-                                mvar_vec = await read_vector(wrapped_ws)
+                                if DEBUG_PROTOCOL:
+                                    print(f"[{site_id}] Initialize received; expecting mvar vector next", flush=True)
+                                mvar_vec = await _read_mvar_vector_with_retry(wrapped_ws, site_id)
                                 mvar = [int(idx) - 1 for idx in mvar_vec]
                                 state["mvar"] = mvar
                                 miss = np.isnan(D)
@@ -142,6 +166,8 @@ async def remote_kernel(D, central_host, central_port, site_id):
                                 raise
                         elif inst == "Information":
                             try:
+                                if DEBUG_PROTOCOL:
+                                    print(f"[{site_id}] Information instruction start", flush=True)
                                 method = await read_string(wrapped_ws)
                                 j_r = await read_integer(wrapped_ws)
                                 j = j_r - 1
@@ -153,11 +179,15 @@ async def remote_kernel(D, central_host, central_port, site_id):
                                     valid_idx = ~np.isnan(DD)[:, j]
                                 X = np.delete(DD[valid_idx], j, axis=1)
                                 y = DD[valid_idx, j]
+                                if DEBUG_PROTOCOL:
+                                    print(f"[{site_id}] Information method={method} j={j} DD_shape={None if DD is None else DD.shape}", flush=True)
                                 if method.lower() == "gaussian":
                                     await si_remote_ls(X, y, wrapped_ws, site_id)
                                 elif method.lower() == "logistic":
                                     mode = await read_integer(wrapped_ws)
                                     beta = await read_vector(wrapped_ws)
+                                    if DEBUG_PROTOCOL:
+                                        print(f"[{site_id}] Logistic info: mode={mode} beta_len={len(beta)} n_local={X.shape[0]}", flush=True)
                                     await write_vector(np.array([X.shape[0]]), wrapped_ws)
                                     await si_remote_logit(X, y, wrapped_ws, beta, site_id, mode)
                                 else:
@@ -182,8 +212,12 @@ async def remote_kernel(D, central_host, central_port, site_id):
                                     beta = await read_vector(wrapped_ws)
                                     sigv = await read_vector(wrapped_ws)
                                     sig = float(sigv[0])
+                                    if DEBUG_PROTOCOL:
+                                        print(f"[{site_id}] Impute Gaussian j={j} nmidx={nmidx} beta_len={len(beta)} sig={sig}", flush=True)
                                 elif method.lower() == "logistic":
                                     alpha = await read_vector(wrapped_ws)
+                                    if DEBUG_PROTOCOL:
+                                        print(f"[{site_id}] Impute Logistic j={j} nmidx={nmidx} alpha_len={len(alpha)}", flush=True)
                                 else:
                                     print(f"[{site_id}] Unknown impute method: {method}")
                                     continue
@@ -197,11 +231,25 @@ async def remote_kernel(D, central_host, central_port, site_id):
                                     pr = 1.0 / (1.0 + np.exp(-(X @ alpha)))
                                     DD[midx, j] = np.random.binomial(1, pr)
                                 state["DD"] = DD
+                                if DEBUG_PROTOCOL:
+                                    print(f"[{site_id}] Impute update complete j={j}", flush=True)
                             except Exception as e:
                                 print(f"[{site_id}] Impute error: {type(e).__name__}: {e}")
                         elif inst == "End":
-                            print(f"[{site_id}] End received; exiting", flush=True)
-                            return
+                            # Previously: terminate remote kernel. New behavior: optionally persist and await further instructions.
+                            persist_flag = os.getenv("PERSIST_AFTER_END", "1").lower() in ("1", "true", "yes", "on")
+                            if persist_flag:
+                                # Reset minimal state but keep connection open so a subsequent central job can reuse this remote.
+                                print(f"[{site_id}] End received; persisting (set PERSIST_AFTER_END=0 to exit)", flush=True)
+                                # Clear imputation-specific state but retain DD so future rounds can decide whether to reinitialize.
+                                # If a full reset is desired, clear DD as well.
+                                state["mvar"] = []
+                                # Do not return; continue waiting for next instruction
+                                consecutive_errors = 0
+                                continue
+                            else:
+                                print(f"[{site_id}] End received; exiting (PERSIST_AFTER_END disabled)", flush=True)
+                                return
                         elif inst == "ping":
                             await write_string("pong", wrapped_ws)
                         else:
@@ -251,5 +299,30 @@ def run_remote_client(data_file, central_host, central_port, site_id=None, remot
     if remote_port is not None:
         print(f"[{site_id}] Ignoring remote_port={remote_port} (no local server)", flush=True)
     asyncio.run(remote_kernel(D, central_host, central_port, site_id))
+
+
+# ---------------------------------------------------------------
+# New async-friendly API (for in-process task execution)
+# ---------------------------------------------------------------
+async def async_run_remote_client(data_file, central_host, central_port, site_id=None, config=None):
+    """Async variant of run_remote_client for SIMICE.
+
+    Args:
+        data_file: path or matrix
+        central_host, central_port, site_id: connection metadata
+        config: retained for symmetry (currently unused)
+    """
+    if isinstance(data_file, str):
+        D = pd.read_csv(data_file).values
+    else:
+        D = data_file
+    if site_id is None:
+        site_id = "remote1"
+    print(f"[async:{site_id}] Starting SIMICE remote task", flush=True)
+    try:
+        await remote_kernel(D, central_host, central_port, site_id)
+    except asyncio.CancelledError:
+        print(f"[async:{site_id}] Cancelled SIMICE remote task", flush=True)
+        raise
 
  

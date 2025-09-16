@@ -5,14 +5,14 @@
     "multi_column": true,
     "required": [
         "target_column_indexes",
-        "is_binary",
+        "is_binary_list",
         "iteration_before_first_imputation",
         "iteration_between_imputations",
         "imputation_trials"
     ],
     "ui:order": [
         "target_column_indexes",
-        "is_binary",
+        "is_binary_list",
         "iteration_before_first_imputation",
         "iteration_between_imputations",
         "imputation_trials"
@@ -27,7 +27,7 @@
             "ui:placeholder": "e.g., 2,5,7",
             "ui:arrayInput": "csv"
         },
-        "is_binary": {
+        "is_binary_list": {
             "type": "array",
             "items": { "type": "boolean" },
             "minItems": 1,

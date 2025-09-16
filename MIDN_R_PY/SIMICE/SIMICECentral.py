@@ -156,23 +156,92 @@ async def simice_central(D, config=None, site_ids=None, websockets=None, debug=T
     --------
     List of imputed datasets
     """
-    # Extract parameters from config
+    # Normalize raw config (post-move: central server now passes raw DB params directly)
     if config is None:
         raise ValueError("Config dictionary is required")
-    
-    M = config.get("M")
-    mvar = config.get("mvar")
-    type_list = config.get("type_list")
-    iter_val = config.get("iter_val")
-    iter0_val = config.get("iter0_val")
-    
-    if M is None or mvar is None or type_list is None:
-        raise ValueError("Missing required parameters in config: M, mvar, or type_list")
-    
+    raw = dict(config)
+    norm: Dict[str, Any] = {}
+    # mvar may come as 'mvar' (already 0-based) OR 'target_column_indexes' (1-based, comma string or list)
+    def _parse_index_list(val):
+        if val is None:
+            return []
+        if isinstance(val, str):
+            parts = [p.strip() for p in val.replace(';',',').split(',') if p.strip()]
+        else:
+            parts = list(val)
+        out = []
+        for p in parts:
+            try:
+                iv = int(p)
+                out.append(iv - 1 if iv > 0 else iv)
+            except Exception:
+                continue
+        return out
+    if 'mvar' in raw and not isinstance(raw.get('mvar'), (list, tuple)):
+        # Single index
+        try:
+            iv = int(raw['mvar'])
+            norm['mvar'] = [iv] if iv < 0 else [iv]
+        except Exception:
+            norm['mvar'] = raw['mvar'] if isinstance(raw['mvar'], list) else []
+    if 'mvar' in raw and isinstance(raw['mvar'], (list, tuple)):
+        norm['mvar'] = [int(i) for i in raw['mvar']]
+    if 'target_column_indexes' in raw:
+        norm['mvar'] = _parse_index_list(raw['target_column_indexes'])
+    # Fallback ensure mvar list
+    mvar_list = norm.get('mvar') or []
+    # Determine type_list: explicit type_list or derive from is_binary_list
+    if 'type_list' in raw and isinstance(raw['type_list'], list):
+        tlist = raw['type_list']
+    else:
+        bin_list = raw.get('is_binary_list')
+        if isinstance(bin_list, list):
+            tlist = ['logistic' if b else 'Gaussian' for b in bin_list]
+        elif isinstance(bin_list, bool) and mvar_list:
+            tlist = ['logistic' if bin_list else 'Gaussian'] * len(mvar_list)
+        else:
+            tlist = []
+    if tlist:
+        norm_map = {
+            'gaussian':'Gaussian','g':'Gaussian','cont':'Gaussian','continuous':'Gaussian',
+            'logistic':'logistic','bin':'logistic','binary':'logistic'
+        }
+        norm['type_list'] = [norm_map.get(str(t).lower(), str(t)) for t in tlist]
+    # Iterations
+    if 'iter_val' in raw:
+        norm['iter_val'] = raw['iter_val']
+    elif 'iteration_between_imputations' in raw:
+        norm['iter_val'] = raw['iteration_between_imputations']
+    if 'iter0_val' in raw:
+        norm['iter0_val'] = raw['iter0_val']
+    elif 'iteration_before_first_imputation' in raw:
+        norm['iter0_val'] = raw['iteration_before_first_imputation']
+    # M
+    if 'M' in raw:
+        norm['M'] = raw['M']
+    elif 'imputation_trials' in raw:
+        norm['M'] = raw['imputation_trials']
+    else:
+        norm['M'] = 1
+    # Copy any other keys not already consumed
+    skip = {'target_column_indexes','is_binary_list','iteration_before_first_imputation','iteration_between_imputations','mvar','type_list','iter_val','iter0_val','imputation_trials','M'}
+    for k, v in raw.items():
+        if k in skip:
+            continue
+        norm.setdefault(k, v)
+    # Replace config with normalized
+    config = norm
+    M = config.get('M')
+    mvar = config.get('mvar')
+    type_list = config.get('type_list')
+    iter_val = config.get('iter_val')
+    iter0_val = config.get('iter0_val')
+    if M is None or not mvar or not type_list:
+        raise ValueError(f"Missing required parameters after normalization: M={M} mvar={mvar} type_list={type_list}")
     if iter_val is None:
-        iter_val = 100  # Default value
+        iter_val = 100
     if iter0_val is None:
-        iter0_val = 100  # Default value
+        iter0_val = 100
     global print_debug_info
     if debug is not None:
         print_debug_info = debug

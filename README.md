@@ -36,8 +36,8 @@ Use `is_binary: true` and binary target data (0/1):
 ## SIMICE with Mixed Types
 SIMICE can handle both continuous and binary variables in the same job:
 - Set `target_column_indexes` to the list of 1-based column indices
-- Set `is_binary` array where `true` indicates binary variables, `false` for continuous
-- The algorithm will automatically apply Gaussian imputation for continuous and logistic for binary variableserver orchestrates imputation jobs; remote sites contribute only aggregates via WebSockets.
+- Set `is_binary_list` array where `true` indicates binary variables, `false` for continuous
+- The algorithm will automatically apply Gaussian (continuous) or Logistic (binary) per column.
 
 Two algorithms are implemented: 
 - **SIMI** (Sequential Imputation using Model Imputation) - Gaussian and Logistic paths for single variables
@@ -149,14 +149,14 @@ curl -X POST http://127.0.0.1:8000/api/jobs/ \
     "algorithm": "SIMICE",
     "parameters": {
       "target_column_indexes": [2, 4], 
-      "is_binary": [false, true],
+  "is_binary_list": [false, true],
       "iteration_before_first_imputation": 5,
       "iteration_between_imputations": 3
     },
     "participants": ["<SITE_ID_FROM_CENTRAL>"],
     "missing_spec": {
       "target_column_indexes": [2, 4], 
-      "is_binary": [false, true]
+  "is_binary_list": [false, true]
     },
     "iteration_before_first_imputation": 5,
     "iteration_between_imputations": 3

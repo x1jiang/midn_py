@@ -220,19 +220,37 @@ async def write_vector(v: np.ndarray, websocket: Union[WebSocket, Any]) -> None:
     await ws.send_text(env.to_json())
 
 async def read_vector(websocket: Union[WebSocket, Any]) -> np.ndarray:
-    # HIGHLIGHT: receive JSON and decode base64 payload into np.ndarray
+    """Receive a FLOAT64 vector envelope, tolerating limited stray frames.
+
+    Race condition context: A late heartbeat / ping (STR/HB) frame or a
+    reconnect-induced status string can arrive just before the numeric
+    payload the remote expects (e.g., mvar list). Previously we only
+    tolerated exactly one stray frame which was occasionally insufficient
+    when two quick administrative frames appeared (e.g., 'ping', 'pong').
+
+    Strategy: Allow up to MAX_STRAY non-error frames that are clearly not
+    the expected VEC/FLOAT64 numeric payload. Skip silently unless they
+    are an ERR frame (which is raised immediately). After exceeding the
+    stray allowance we raise the original descriptive error.
+    """
     ws = websocket if isinstance(websocket, WebSocketWrapper) else get_wrapped_websocket(websocket)
-    txt = await ws.receive_text()
-    env = Envelope.from_json(txt)
-    if env.cmd == Cmd.ERR:
-        raise ValueError(env.error or "Protocol error")
-    if env.obj != Obj.VEC or env.dtype != DType.FLOAT64:
+    stray_count = 0
+    MAX_STRAY = 3  # small safety margin; keeps tight detection while robust
+    while True:
+        txt = await ws.receive_text()
+        env = Envelope.from_json(txt)
+        if env.cmd == Cmd.ERR:
+            raise ValueError(env.error or "Protocol error")
+        if env.obj == Obj.VEC and env.dtype == DType.FLOAT64:
+            if env.payload is None or env.rows is None:
+                raise ValueError("Missing payload/rows for vector")
+            raw = _b64_decode(env.payload)
+            return np.frombuffer(raw, dtype=_np_dtype_for(DType.FLOAT64), count=env.rows)
+        # Skip benign stray frames (e.g., STR/HB/NUM) up to MAX_STRAY
+        if stray_count < MAX_STRAY and env.obj in {Obj.STR, Obj.HB, Obj.NUM}:
+            stray_count += 1
+            continue
         raise ValueError(f"Expected VEC/float64, got {env.obj}/{env.dtype}")
-    if env.payload is None or env.rows is None:
-        raise ValueError("Missing payload/rows for vector")
-    raw = _b64_decode(env.payload)
-    arr = np.frombuffer(raw, dtype=_np_dtype_for(DType.FLOAT64), count=env.rows)
-    return arr
 
 async def write_matrix(m: np.ndarray, websocket: Union[WebSocket, Any]) -> None:
     # HIGHLIGHT: send JSON with base64 numeric payload (FLOAT64, 2D)
