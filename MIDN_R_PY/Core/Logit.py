@@ -281,7 +281,7 @@ async def SILogitNet(D: np.ndarray, idx: List[int], j: int,
             websocket = remote_websockets[site_id]
             async with site_locks[site_id]:
                 ws = get_wrapped_websocket(websocket, pre_accepted=True)
-                print(f"[CENTRAL][SILOGIT  Requesting info from {site_id} for column (0-based) {j} for data {beta}, time {asyncio.get_event_loop().time() - start_time:.4f}s", flush=True)
+                # print(f"[CENTRAL][SILOGIT  Requesting info from {site_id} for column (0-based) {j} for data {beta}, time {asyncio.get_event_loop().time() - start_time:.4f}s", flush=True)
                 await write_string("Information", ws)
                 await write_string("logistic", ws)
                 await write_integer(j + 1, ws)                   # HIGHLIGHT (send 1-based)
@@ -292,7 +292,7 @@ async def SILogitNet(D: np.ndarray, idx: List[int], j: int,
                 H += await read_matrix(ws)
                 g += await read_vector(ws)
                 Q += float((await read_vector(ws))[0])
-                print(f"[CENTRAL][SILOGIT  After aggregation from {site_id}: N={N}, H.shape={H.shape}, g.shape={g.shape}, Q={Q}, time={asyncio.get_event_loop().time() - start_time:.4f}s", flush=True)
+                # print(f"[CENTRAL][SILOGIT  After aggregation from {site_id}: N={N}, H.shape={H.shape}, g.shape={g.shape}, Q={Q}, time={asyncio.get_event_loop().time() - start_time:.4f}s", flush=True)
         # Regularization with N*lam (R parity)
         H = H + (N * lam) * np.eye(p)                            # HIGHLIGHT
         g = g - (N * lam) * beta                                 # HIGHLIGHT
@@ -335,7 +335,7 @@ async def SILogitNet(D: np.ndarray, idx: List[int], j: int,
             if (nQ - Q) > (mval * step / 2.0):                   # HIGHLIGHT (line-search rule)
                 break
             step *= 0.5
-        print(f"Iter={_+1}, Q={Q:.4f}, step={step:.4f}, max|dir|={np.max(np.abs(direction)):.6f}, time={asyncio.get_event_loop().time() - start_time:.4f}s", flush=True)
+        # print(f"Iter={_+1}, Q={Q:.4f}, step={step:.4f}, max|dir|={np.max(np.abs(direction)):.6f}, time={asyncio.get_event_loop().time() - start_time:.4f}s", flush=True)
         if np.max(np.abs(nbeta - beta)) < 1e-5:
             beta = nbeta
             break
@@ -442,7 +442,7 @@ async def CSLLogitNet(D: np.ndarray, idx: List[int], j: int,
     # Check if we have any connected sites
     active_site_ids = [site_id for site_id in site_ids if site_id in remote_websockets]
     if not active_site_ids and len(site_ids) > 0:
-            print(f"[CENTRAL][CSL-LOGIT  No connected sites remaining", flush=True)
+        print(f"[CENTRAL][CSL-LOGIT  No connected sites remaining", flush=True)
     
     # Request information from remote sites
     for site_id in site_ids:
@@ -686,7 +686,7 @@ async def ImputeLogit(j: int, alpha: np.ndarray,
     active_site_ids = [site_id for site_id in site_ids if site_id in remote_websockets]
     if not active_site_ids and len(site_ids) > 0:
         print(f"[CENTRAL][IMPUTE-LOGIT No connected sites remaining", flush=True)
-    print(f"[CENTRAL][IMPUTE-LOGIT  Imputing column (0-based) {j} with alpha={alpha}", flush=True)
+    # print(f"[CENTRAL][IMPUTE-LOGIT  Imputing column (0-based) {j} with alpha={alpha}", flush=True)
     # Send imputation information to remote sites
     for k, site_id in enumerate(site_ids):                           # HIGHLIGHT
         if site_id not in remote_websockets:

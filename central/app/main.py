@@ -15,6 +15,7 @@ import numpy as np
 import zipfile
 import io
 import sys
+import contextlib
 
 from . import models, schemas, services
 from .db import get_db, engine
@@ -479,16 +480,57 @@ async def gui_jobs_start_post(
             try:
                 import importlib
                 # Debug: record raw and normalized config before invocation
-                jobs_runtime[job_id_local]["messages"].append(f"DEBUG raw_params={raw_params}")
-                jobs_runtime[job_id_local]["messages"].append(f"DEBUG config_pre_call={config}")
+                #jobs_runtime[job_id_local]["messages"].append(f"DEBUG raw_params={raw_params}")
+                #jobs_runtime[job_id_local]["messages"].append(f"DEBUG config_pre_call={config}")
                 if algorithm_name == "simi":
                     algorithm_central = importlib.import_module("SIMI.SIMICentral").simi_central
                 elif algorithm_name == "simice":
                     algorithm_central = importlib.import_module("SIMICE.SIMICECentral").simice_central
                 else:
                     raise ValueError(f"Unsupported algorithm {algorithm_name}")
-                # All normalization of config is deferred to the algorithm implementation
-                imputed = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets)
+                # Real-time streaming capture of algorithm prints
+                class _StreamingCapture:
+                    def __init__(self, job_id: int, kind: str):
+                        self._job_id = job_id
+                        self._kind = kind
+                        self._buf = ""
+                        self.encoding = "utf-8"
+                    def write(self, s: str):
+                        if s is None:
+                            return 0
+                        self._buf += s
+                        while "\n" in self._buf:
+                            line, self._buf = self._buf.split("\n", 1)
+                            line = line.rstrip()
+                            if line.strip():
+                                try:
+                                    jobs_runtime[self._job_id]["messages"].append(f"[algo {self._kind}] {line}")
+                                except Exception:
+                                    pass
+                        return len(s)
+                    def flush(self):
+                        if self._buf.strip():
+                            try:
+                                jobs_runtime[self._job_id]["messages"].append(f"[algo {self._kind}] {self._buf.strip()}")
+                            except Exception:
+                                pass
+                            self._buf = ""
+                    def isatty(self):
+                        return False
+                orig_stdout, orig_stderr = sys.stdout, sys.stderr
+                sys.stdout = _StreamingCapture(job_id_local, "stdout")  # type: ignore
+                sys.stderr = _StreamingCapture(job_id_local, "stderr")  # type: ignore
+                try:
+                    # All normalization of config is deferred to the algorithm implementation
+                    imputed = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets)
+                finally:
+                    # Flush remaining partial lines
+                    try:
+                        sys.stdout.flush()
+                        sys.stderr.flush()
+                    except Exception:
+                        pass
+                    sys.stdout, sys.stderr = orig_stdout, orig_stderr
                 jobs_runtime[job_id_local]["messages"].append("Imputation completed.")
                 # Persist results
                 try:
@@ -498,7 +540,8 @@ async def gui_jobs_start_post(
                     else:
                         datasets = [imputed]
                     # Create a unique timestamped directory per run
-                    ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                    # Use local server time instead of UTC for directory/zip naming
+                    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                     job_dir_name = f"job_{job_id_local}_{ts}"
                     job_dir = RESULTS_DIR / job_dir_name
                     job_dir.mkdir(exist_ok=True)

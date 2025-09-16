@@ -34,7 +34,7 @@ from Core.transfer import (
 from Core.LS import ImputeLS, SILSNet
 from Core.Logit import ImputeLogit, SILogitNet
 # Set to True to enable detailed debug information
-print_debug_info = True
+print_debug_info = False
 
 # Deterministic RNG: global seed from env or random
 # If SIMICE_GLOBAL_SEED is not provided, use a random seed
@@ -130,7 +130,7 @@ async def finalize_remote_sites(site_ids):
             except Exception as e:
                 print(f"[CENTRAL] Error sending End message to {site_id}: {type(e).__name__}: {str(e)}", flush=True)
 
-async def simice_central(D, config=None, site_ids=None, websockets=None, debug=True):
+async def simice_central(D, config=None, site_ids=None, websockets=None, debug=False):
     """
     Implement the SIMICE central algorithm with unified interface
     

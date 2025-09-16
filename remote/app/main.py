@@ -442,46 +442,19 @@ async def start_job(
     except Exception as e:
         print(f"Error fetching job details: {e}")
     
-    # Determine the appropriate missing variable index based on the job type
-    try:
-        # Get job parameters if available
-        is_binary = False
-        if job_details and "parameters" in job_details:
-            # For SIMI jobs, use the target column index from parameters
-            if job_details["algorithm"] == "SIMI" and "target_column_index" in job_details["parameters"]:
-                mvar = job_details["parameters"]["target_column_index"]
-                # Check if the job is for binary imputation
-                if "is_binary" in job_details["parameters"]:
-                    is_binary = job_details["parameters"]["is_binary"]
-                    print(f"Using SIMI with binary flag: {is_binary}")
-                print(f"Using SIMI target column index from job parameters: {mvar}")
-            # For SIMICE jobs, use the first target column index from parameters
-            elif job_details["algorithm"] == "SIMICE" and "target_column_indexes" in job_details["parameters"]:
-                target_columns = job_details["parameters"]["target_column_indexes"]
-                if target_columns and len(target_columns) > 0:
-                    mvar = target_columns[0]
-                    print(f"Using SIMICE first target column from job parameters: {mvar}")
-        
-        # Convert to integer and adjust to 0-based indexing
-        mvar_index = int(mvar) - 1
-        print(f"Using missing variable index: {mvar} (1-based) -> {mvar_index} (0-based)")
-        
-        # Validate if the column index is valid for the dataset
-        if mvar_index < 0 or mvar_index >= df.shape[1]:
-            print(f"Invalid column index: {mvar_index} (0-based) for dataset with {df.shape[1]} columns")
-            return templates.TemplateResponse("error.html", {
-                "request": request, 
-                "error": f"Invalid column index: {mvar}. Dataset has {df.shape[1]} columns (1-{df.shape[1]})."
-            })
-            
-    except ValueError as e:
-        print(f"Invalid mvar value: {mvar}, Error: {str(e)}")
-        return templates.TemplateResponse("error.html", {
-            "request": request, 
-            "error": "Invalid value for Missing Variable Index. Please check your data file format."
-        })
+    # Determine high-level algorithm type early (job_details preferred)
+    algo = (job_details.get("algorithm") if job_details else job_type or "SIMI").upper()
+    params_from_job = (job_details or {}).get("parameters", {}) if job_details else {}
+    # Build a parameters dict to pass directly to async_run_remote_client; SIMI will validate internally now.
+    # For backward compatibility we still keep the originally submitted mvar in parameters if central didn't supply one.
+    parameters: Dict[str, Any] = dict(params_from_job)  # shallow copy
+     
+    if df.shape[1] == 0:
+        return templates.TemplateResponse("error.html", {"request": request, "error": "Uploaded CSV has no columns."})
+    # Do not perform detailed column-bound validation here; moved to SIMIRemote.async_run_remote_client.
+    print(f"[start_job] Delegated parameter validation to remote client. Parameters passed: {parameters}")
     
-    # Create task based on job type
+    # Create task based on job type with streaming capture & proper error handling
     try:
         # Prepare sys.path to import MIDN_R_PY implementations
         sys.path.append(str(Path(__file__).resolve().parents[2] / "MIDN_R_PY"))
@@ -490,155 +463,147 @@ async def start_job(
         ws = urlparse(active_site.CENTRAL_URL)
         central_host = ws.hostname or "localhost"
         central_port = ws.port or (443 if ws.scheme == "wss" else 80)
-        
-        # Persist CSV to a temp file so child processes can read it
+
+        # Persist CSV to a temp file so algorithm can read it
         jobs_dir = Path("remote_runtime/jobs")
         jobs_dir.mkdir(parents=True, exist_ok=True)
         data_path = jobs_dir / f"job_{job_id}_{active_site.SITE_ID}.csv"
         df.to_csv(data_path, index=False)
         print(f"Saved job data to {data_path}")
 
-        # Choose a non-conflicting port for the child remote client server
-        # Avoid the main app ports (8001/8002). Use 18000-series based on site suffix.
-        remote_port: int
-        sid = active_site.SITE_ID or "remote"
-        if sid and sid[-1].isdigit():
-            remote_port = 18000 + int(sid[-1])
-        else:
-            remote_port = 18100
-
-        # Build config for algorithms similar to run_imputation.py
-        algo = (job_details.get("algorithm") if job_details else job_type or "SIMI").upper()
-        task = None  # async task handle
-        if algo == "SIMICE":
-            params = (job_details or {}).get("parameters", {}) if job_details else {}
-            target_column_indexes: List[int] = params.get("target_column_indexes") or [mvar]
-            is_binary_list: List[bool] = params.get("is_binary_list") or [False]
-            iter0 = iteration_before_first_imputation if iteration_before_first_imputation is not None else params.get("iteration_before_first_imputation")
-            iterv = iteration_between_imputations if iteration_between_imputations is not None else params.get("iteration_between_imputations")
-            algo_config: Dict[str, Any] = {
-                "type_list": ["binary" if b else "gaussian" for b in is_binary_list],
-                "iter0_val": int(iter0) if iter0 is not None else 5,
-                "iter_val": int(iterv) if iterv is not None else 5,
-                "target_column_indexes": target_column_indexes,
-                "is_binary_list": is_binary_list,
-                "job_id": job_id,
-                "site_id": active_site.SITE_ID,
-            }
-            print(f"Starting SIMICE remote client async task host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
-            import importlib
-            async_mod = importlib.import_module("SIMICE.SIMICERemote")
-            task = asyncio.create_task(async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, algo_config))
-            child_pid = None
-        else:
-            method = "logistic" if is_binary else "gaussian"
-            algo_config: Dict[str, Any] = {
-                "M": 1,
-                "mvar": mvar_index + 1,
-                "method": method,
-                "job_id": job_id,
-                "site_id": active_site.SITE_ID,
-            }
-            print(f"Starting SIMI remote client async task host={central_host}:{central_port}, port={remote_port}, config={algo_config}")
-            import importlib
-            async_mod = importlib.import_module("SIMI.SIMIRemote")
-            task = asyncio.create_task(async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, algo_config))
-            child_pid = None
-
-        print("Job started successfully")
-        
-        # DEBUG: Check request.app.state before job registration
-        print(f"🐛 DEBUG: request.app.state type: {type(request.app.state)}")
-        print(f"🐛 DEBUG: request.app.state attributes before: {[attr for attr in dir(request.app.state) if not attr.startswith('_')]}")
-        print(f"🐛 DEBUG: request.app instance ID: {id(request.app)}")
-        
-        # Get or create site-specific job dictionary
+        # Registry for site jobs (create early so capture can write)
         site_jobs_attr = f'running_jobs_{active_site.SITE_ID}'
-        print(f"🐛 DEBUG: Creating attribute: {site_jobs_attr}")
-        
         if not hasattr(request.app.state, site_jobs_attr):
             setattr(request.app.state, site_jobs_attr, {})
-            print(f"🏠 Created new job dictionary for site {active_site.SITE_ID}")
-        else:
-            print(f"🏠 Using existing job dictionary for site {active_site.SITE_ID}")
-        
-        # Verify the attribute was created
-        print(f"🐛 DEBUG: hasattr check: {hasattr(request.app.state, site_jobs_attr)}")
-        print(f"🐛 DEBUG: request.app.state attributes after: {[attr for attr in dir(request.app.state) if not attr.startswith('_')]}")
-        
-        # Track the running job in the site-specific state
         site_jobs = getattr(request.app.state, site_jobs_attr)
-        print(f"🐛 DEBUG: Retrieved site_jobs: {type(site_jobs)} with {len(site_jobs)} existing jobs")
         site_jobs[job_id] = {
             'status': 'Running',
             'messages': ['Job started successfully'],
             'start_time': datetime.now(),
             'completed': False,
             'end_time': None,
-            'site_id': active_site.SITE_ID,  # Store site ID with the job
+            'site_id': active_site.SITE_ID,
             'data_path': str(data_path),
-            'remote_port': remote_port,
-            'pid': child_pid,
+            'pid': None,
             'async': True,
-            'task': task
+            'task': None
         }
+        job_entry = site_jobs[job_id]
 
-        # Attach lifecycle callback
+        class _StreamingCapture:
+            def __init__(self, kind: str):
+                self._kind = kind
+                self._buf = ""
+                self.encoding = "utf-8"
+            def write(self, s: str):
+                if s is None:
+                    return 0
+                self._buf += s
+                while "\n" in self._buf:
+                    line, self._buf = self._buf.split("\n", 1)
+                    line = line.rstrip()
+                    if line.strip():
+                        try:
+                            job_entry['messages'].append(f"[remote {self._kind}] {line}")
+                        except Exception:
+                            pass
+                return len(s)
+            def flush(self):
+                if self._buf.strip():
+                    try:
+                        job_entry['messages'].append(f"[remote {self._kind}] {self._buf.strip()}")
+                    except Exception:
+                        pass
+                    self._buf = ""
+            def isatty(self):
+                return False
+
+        import importlib
+        if algo == "SIMICE":
+            parameters.setdefault("job_id", job_id)
+            parameters.setdefault("site_id", active_site.SITE_ID)
+            async_mod = importlib.import_module("SIMICE.SIMICERemote")
+            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, parameters)
+        elif algo == "SIMI":
+            parameters.setdefault("job_id", job_id)
+            parameters.setdefault("site_id", active_site.SITE_ID)
+            async_mod = importlib.import_module("SIMI.SIMIRemote")
+            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, parameters)
+        else:
+            raise ValueError(f"Unsupported algorithm type: {algo}")
+
+        async def _run_with_capture():
+            orig_stdout, orig_stderr = sys.stdout, sys.stderr
+            sys.stdout = _StreamingCapture("stdout")  # type: ignore
+            sys.stderr = _StreamingCapture("stderr")  # type: ignore
+            try:
+                job_entry['messages'].append(f"Starting remote client (algo={algo})...")
+                return await remote_coro
+            except asyncio.CancelledError:
+                job_entry['messages'].append("Remote job cancelled by user.")
+                raise
+            except Exception as e:
+                job_entry['messages'].append(f"Remote job error: {e}")
+                raise
+            finally:
+                try:
+                    sys.stdout.flush(); sys.stderr.flush()
+                except Exception:
+                    pass
+                sys.stdout, sys.stderr = orig_stdout, orig_stderr
+
+        task = asyncio.create_task(_run_with_capture())
+        job_entry['task'] = task
+
         def _task_done_cb(t: asyncio.Task, _app=app, _site_id=active_site.SITE_ID, _job_id=job_id):
             try:
                 site_jobs_attr_inner = f'running_jobs_{_site_id}'
                 if not hasattr(_app.state, site_jobs_attr_inner):
                     return
                 jobs_dict = getattr(_app.state, site_jobs_attr_inner)
-                job_entry = jobs_dict.get(_job_id)
-                if not job_entry:
+                je = jobs_dict.get(_job_id)
+                if not je:
                     return
-                job_entry['end_time'] = datetime.now()
+                je['end_time'] = datetime.now()
                 if t.cancelled():
-                    job_entry['status'] = 'Cancelled'
-                    job_entry['messages'].append('Task was cancelled')
+                    je['status'] = 'Cancelled'
+                    je['messages'].append('Task was cancelled')
                 else:
                     exc = t.exception()
                     if exc:
-                        job_entry['status'] = 'Error'
-                        job_entry['messages'].append(f"Task error: {exc}")
-                        job_entry['traceback'] = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                        je['status'] = 'Error'
+                        je['messages'].append(f"Task error: {exc}")
+                        je['traceback'] = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))
                     else:
-                        job_entry['status'] = 'Completed'
-                        job_entry['messages'].append('Task completed successfully')
-                job_entry['completed'] = job_entry['status'] in ('Cancelled', 'Completed') or job_entry['status'] == 'Error'
+                        je['status'] = 'Completed'
+                        je['messages'].append('Task completed successfully')
+                je['completed'] = je['status'] in ('Cancelled', 'Completed') or je['status'] == 'Error'
             except Exception as cb_e:
                 print(f"Error in task done callback for job {_job_id}: {cb_e}")
         task.add_done_callback(_task_done_cb)
-        
-        # Log for debugging job isolation
+
+        # Log & aggregate job dictionaries
         print(f"🔄 Job {job_id} registered in request.app.state for site {active_site.SITE_ID}")
         print(f"📊 Jobs for this site: {list(site_jobs.keys())}")
-        
-        # Check all known sites for running job dictionaries
         all_running_jobs = []
         for site in config.settings.sites:
             check_attr = f'running_jobs_{site.SITE_ID}'
             if hasattr(request.app.state, check_attr):
                 jobs_dict = getattr(request.app.state, check_attr)
-                if jobs_dict:  # Only include if has jobs
+                if jobs_dict:
                     all_running_jobs.append(f"{check_attr}({len(jobs_dict)} jobs)")
         print(f"🏘️ All active job dictionaries: {all_running_jobs}")
-        
+
         if is_ajax:
             return {"success": True, "job_id": job_id}
         else:
             return RedirectResponse(url="/jobs", status_code=303)
-            
     except Exception as e:
         print(f"Error starting job: {e}")
         if is_ajax:
             return {"success": False, "error": f"Error starting job: {str(e)}"}
         else:
-            return templates.TemplateResponse("error.html", {
-                "request": request, 
-                "error": f"Error starting job: {str(e)}"
-            })
+            return templates.TemplateResponse("error.html", {"request": request, "error": f"Error starting job: {str(e)}"})
 
 @app.post("/cancel_job")
 async def cancel_job(request: Request, job_id: int = Form(...), site_id: Optional[str] = Form(None), site_index: Optional[int] = Form(0)):

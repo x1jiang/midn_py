@@ -193,27 +193,81 @@ def run_remote_client(data, central_host, central_port, site_id, remote_port=Non
 # ---------------------------------------------------------------
 # New async-friendly API (for in-process task execution)
 # ---------------------------------------------------------------
-async def async_run_remote_client(data, central_host, central_port, site_id, config):
-    """Async variant of run_remote_client.
+async def async_run_remote_client(data, central_host, central_port, site_id, parameters):
+    """Async variant of run_remote_client with in-function parameter validation.
 
-    Args:
-        data: path to CSV or numpy-like matrix
-        central_host, central_port, site_id: connection metadata
-        config: expects {'mvar': <1-based int>} like sync version
-    Returns: coroutine that runs until remote kernel exits/cancelled
+    This refactored entrypoint now accepts a raw parameters dictionary coming
+    directly from the job record (remote/app/main.py). All validation and
+    extraction of the missing-variable index (mvar) have been moved here so
+    that the web layer does not need to duplicate logic.
+
+    Accepted parameter keys (case sensitive):
+        target_column_index : 1-based index of the imputation target column
+        mvar                : (legacy / fallback) 1-based index (used if
+                              target_column_index absent)
+        is_binary           : optional bool flag indicating a binary target
+        job_id, site_id     : optional metadata (ignored by algorithm logic)
+        method              : optional override ('gaussian'|'logistic'); if
+                              absent we infer logistic when is_binary True
+
+    Behavior:
+        - Loads data (CSV path or already a matrix)
+        - Derives 1-based mvar from parameters
+        - Validates bounds vs number of columns
+        - Logs chosen configuration (method + binary flag) for transparency
+        - Invokes remote_kernel with 0-based mvar index
+
+    Any validation failure raises ValueError, propagating to the task callback
+    so the job status becomes 'Error'.
     """
+    params = parameters or {}
+
+    # Load data matrix
     if isinstance(data, str):
         D = pd.read_csv(data).values
     else:
         D = data
-    if "mvar" not in config:
-        raise ValueError("Config must contain 'mvar' (1-based index) for SIMI remote")
-    mvar_py = config["mvar"] - 1
-    print(f"[async:{site_id}] Starting SIMI remote task with mvar (0-based)={mvar_py}", flush=True)
+
+    # Extract mvar (1-based) with fallback hierarchy
+    if "target_column_index" in params:
+        try:
+            mvar_1 = int(params["target_column_index"])
+        except Exception as e:
+            raise ValueError(f"Invalid target_column_index value: {params.get('target_column_index')} ({e})")
+    elif "mvar" in params:
+        try:
+            mvar_1 = int(params["mvar"])
+        except Exception as e:
+            raise ValueError(f"Invalid mvar value: {params.get('mvar')} ({e})")
+    else:
+        raise ValueError("Parameters must include 'target_column_index' or 'mvar' (1-based)")
+
+    n_cols = D.shape[1]
+    if not (1 <= mvar_1 <= n_cols):
+        raise ValueError(f"mvar/target_column_index {mvar_1} out of bounds for data with {n_cols} columns (1..{n_cols})")
+
+    mvar_py = mvar_1 - 1
+
+    # Determine method (not currently used by remote_kernel logic itself but helpful for logging)
+    is_binary = bool(params.get("is_binary", False))
+    method = params.get("method")
+    if method is None:
+        method = "logistic" if is_binary else "gaussian"
+    method = method.lower()
+    if method not in ("gaussian", "logistic"):
+        raise ValueError(f"Unsupported method '{method}'. Expected 'gaussian' or 'logistic'.")
+
+    job_id = params.get("job_id")
+    print(
+        f"[async:{site_id}] Starting SIMI remote task job_id={job_id} mvar(1-based)={mvar_1} "
+        f"-> (0-based)={mvar_py} method={method} is_binary={is_binary}",
+        flush=True
+    )
+
     try:
         await remote_kernel(D, mvar_py, central_host, central_port, site_id)
     except asyncio.CancelledError:
-        print(f"[async:{site_id}] Cancelled SIMI remote task", flush=True)
+        print(f"[async:{site_id}] Cancelled SIMI remote task job_id={job_id}", flush=True)
         raise
 
 

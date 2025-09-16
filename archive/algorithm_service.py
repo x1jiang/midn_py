@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from ..central.app import models, schemas
 
 # No-op placeholders to avoid import errors
 

@@ -169,6 +169,7 @@ async def SILSNet(D: np.ndarray, idx: List[int], j: int,
     for site_id in site_ids:
         if site_id in remote_websockets:
             websocket = remote_websockets[site_id]
+            print(f"[CENTRAL][SI-LS  Requesting info from {site_id} for column (0-based) {j}", flush=True)
             try:
                 async with site_locks[site_id]:
                     wrapped_ws = get_wrapped_websocket(websocket, pre_accepted=True)

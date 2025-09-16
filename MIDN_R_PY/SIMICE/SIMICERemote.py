@@ -95,8 +95,8 @@ async def si_remote_logit(X, y, wrapped_ws, beta, site_id, mode=1):
     await write_vector(np.array([Q]), wrapped_ws)
 
 async def remote_kernel(D, central_host, central_port, site_id):
-    """Persistent connection loop implementing SIMICE remote behavior."""
-    # Add intercept column (as before)
+    """Persistent connection loop implementing SIMICE remote behavior (simplified, config ignored)."""
+    # Add intercept column
     D = np.column_stack([D, np.ones(D.shape[0])]).astype(np.float64, copy=False)
     p = D.shape[1]
 
@@ -171,6 +171,7 @@ async def remote_kernel(D, central_host, central_port, site_id):
                                 method = await read_string(wrapped_ws)
                                 j_r = await read_integer(wrapped_ws)
                                 j = j_r - 1
+                                # Optional consistency warning
                                 DD = state["DD"]
                                 orig_missing = state.get("orig_missing_map", {})
                                 if j in orig_missing:
@@ -289,7 +290,7 @@ async def remote_kernel(D, central_host, central_port, site_id):
         backoff = min(max_backoff, backoff * 2)
 
 def run_remote_client(data_file, central_host, central_port, site_id=None, remote_port=None, config=None):
-    """Launch SIMICE remote (remote_port kept for compatibility but unused)."""
+    """Launch SIMICE remote (remote_port kept for compatibility, config accepted but ignored)."""
     if isinstance(data_file, str):
         D = pd.read_csv(data_file).values
     else:
@@ -305,20 +306,14 @@ def run_remote_client(data_file, central_host, central_port, site_id=None, remot
 # New async-friendly API (for in-process task execution)
 # ---------------------------------------------------------------
 async def async_run_remote_client(data_file, central_host, central_port, site_id=None, config=None):
-    """Async variant of run_remote_client for SIMICE.
-
-    Args:
-        data_file: path or matrix
-        central_host, central_port, site_id: connection metadata
-        config: retained for symmetry (currently unused)
-    """
+    """Async variant of run_remote_client for SIMICE. Config accepted but ignored."""
     if isinstance(data_file, str):
         D = pd.read_csv(data_file).values
     else:
         D = data_file
     if site_id is None:
         site_id = "remote1"
-    print(f"[async:{site_id}] Starting SIMICE remote task", flush=True)
+    print(f"[async:{site_id}] Starting SIMICE remote task (config ignored)", flush=True)
     try:
         await remote_kernel(D, central_host, central_port, site_id)
     except asyncio.CancelledError:
