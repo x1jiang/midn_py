@@ -463,6 +463,7 @@ async def start_job(
         ws = urlparse(active_site.CENTRAL_URL)
         central_host = ws.hostname or "localhost"
         central_port = ws.port or (443 if ws.scheme == "wss" else 80)
+        central_proto = ws.scheme or "ws"
 
         # Persist CSV to a temp file so algorithm can read it
         jobs_dir = Path("remote_runtime/jobs")
@@ -523,12 +524,12 @@ async def start_job(
             parameters.setdefault("job_id", job_id)
             parameters.setdefault("site_id", active_site.SITE_ID)
             async_mod = importlib.import_module("SIMICE.SIMICERemote")
-            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, parameters)
+            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, central_proto,active_site.SITE_ID, parameters)
         elif algo == "SIMI":
             parameters.setdefault("job_id", job_id)
             parameters.setdefault("site_id", active_site.SITE_ID)
             async_mod = importlib.import_module("SIMI.SIMIRemote")
-            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, active_site.SITE_ID, parameters)
+            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, central_proto,active_site.SITE_ID, parameters)
         else:
             raise ValueError(f"Unsupported algorithm type: {algo}")
 

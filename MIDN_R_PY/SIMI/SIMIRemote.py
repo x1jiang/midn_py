@@ -106,14 +106,14 @@ async def si_remote_logit(X: np.ndarray, y: np.ndarray, websocket: WebSocketWrap
         print(f"[si_remote_logit] Sent Q={Q}", flush=True)
 
 
-async def remote_kernel(D: np.ndarray, mvar: int, central_host: str, central_port: int, site_id: str):
+async def remote_kernel(D: np.ndarray, mvar: int, central_host: str, central_port: int, central_proto: str, site_id: str):
     """Persistent connection loop with the central server."""
     miss = np.isnan(D[:, mvar])
     X = np.delete(D[~miss], mvar, axis=1)
     y = D[~miss, mvar]
     print(f"[{site_id}] Prepared data X shape={X.shape}, y len={y.shape[0]}", flush=True)
 
-    url = f"ws://{central_host}:{central_port}/ws/{site_id}"
+    url = f"{central_proto}://{central_host}:{central_port}/ws/{site_id}"
     backoff = 1
     max_backoff = 30
 
@@ -174,7 +174,7 @@ async def remote_kernel(D: np.ndarray, mvar: int, central_host: str, central_por
         backoff = min(max_backoff, backoff * 2)
 
 
-def run_remote_client(data, central_host, central_port, site_id, remote_port=None, config=None):
+def run_remote_client(data, central_host, central_port, central_proto, site_id, remote_port=None, config=None):
     """Entry point used by orchestrator. remote_port ignored (kept for compatibility)."""
     if isinstance(data, str):
         D = pd.read_csv(data).values
@@ -187,13 +187,13 @@ def run_remote_client(data, central_host, central_port, site_id, remote_port=Non
     if remote_port is not None:
         print(f"[{site_id}] Ignoring remote_port={remote_port} (no local server)", flush=True)
     print(f"[{site_id}] Starting SIMI remote with mvar (0-based)={mvar_py}", flush=True)
-    asyncio.run(remote_kernel(D, mvar_py, central_host, central_port, site_id))
+    asyncio.run(remote_kernel(D, mvar_py, central_host, central_port, central_proto, site_id))
 
 
 # ---------------------------------------------------------------
 # New async-friendly API (for in-process task execution)
 # ---------------------------------------------------------------
-async def async_run_remote_client(data, central_host, central_port, site_id, parameters):
+async def async_run_remote_client(data, central_host, central_port, central_proto, site_id, parameters):
     """Async variant of run_remote_client with in-function parameter validation.
 
     This refactored entrypoint now accepts a raw parameters dictionary coming
@@ -265,7 +265,7 @@ async def async_run_remote_client(data, central_host, central_port, site_id, par
     )
 
     try:
-        await remote_kernel(D, mvar_py, central_host, central_port, site_id)
+        await remote_kernel(D, mvar_py, central_host, central_port, central_proto, site_id)
     except asyncio.CancelledError:
         print(f"[async:{site_id}] Cancelled SIMI remote task job_id={job_id}", flush=True)
         raise

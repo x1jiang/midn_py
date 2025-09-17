@@ -94,7 +94,7 @@ async def si_remote_logit(X, y, wrapped_ws, beta, site_id, mode=1):
     #print(f"[{site_id}][Information][Logistic] n={n}, p={p}, mode={mode}, Q={Q:.4f}", flush=True)
     await write_vector(np.array([Q]), wrapped_ws)
 
-async def remote_kernel(D, central_host, central_port, site_id):
+async def remote_kernel(D, central_host, central_port, central_proto, site_id):
     """Persistent connection loop implementing SIMICE remote behavior (simplified, config ignored)."""
     # Add intercept column
     D = np.column_stack([D, np.ones(D.shape[0])]).astype(np.float64, copy=False)
@@ -117,7 +117,8 @@ async def remote_kernel(D, central_host, central_port, site_id):
         "orig_missing_map": {}
     }
 
-    url = f"ws://{central_host}:{central_port}/ws/{site_id}"
+
+    url = f"{central_proto}://{central_host}:{central_port}/ws/{site_id}"
     backoff = 1
     max_backoff = 30
 
@@ -305,7 +306,7 @@ def run_remote_client(data_file, central_host, central_port, site_id=None, remot
 # ---------------------------------------------------------------
 # New async-friendly API (for in-process task execution)
 # ---------------------------------------------------------------
-async def async_run_remote_client(data_file, central_host, central_port, site_id=None, config=None):
+async def async_run_remote_client(data_file, central_host, central_port, central_proto, site_id=None, config=None):
     """Async variant of run_remote_client for SIMICE. Config accepted but ignored."""
     if isinstance(data_file, str):
         D = pd.read_csv(data_file).values
@@ -315,7 +316,7 @@ async def async_run_remote_client(data_file, central_host, central_port, site_id
         site_id = "remote1"
     print(f"[async:{site_id}] Starting SIMICE remote task (config ignored)", flush=True)
     try:
-        await remote_kernel(D, central_host, central_port, site_id)
+        await remote_kernel(D, central_host, central_port, central_proto, site_id)
     except asyncio.CancelledError:
         print(f"[async:{site_id}] Cancelled SIMICE remote task", flush=True)
         raise

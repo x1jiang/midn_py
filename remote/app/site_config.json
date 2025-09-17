@@ -2,18 +2,17 @@
   "sites": [
     {
       "name": "remote1",
-      "CENTRAL_URL": "ws://127.0.0.1:8000",
-      "HTTP_URL": "http://127.0.0.1:8000",
-      "SITE_ID": "224bdbc5",
-      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMjRiZGJjNSIsImV4cCI6MTc2MDU0MDU5OX0.PALYi7ATTVehI6tyDxWTklgqC8wJSxIBMOROOOk2T3k"
-      
+      "CENTRAL_URL": "wss://midn-299043301932.us-east1.run.app",
+      "HTTP_URL": "https://midn-299043301932.us-east1.run.app",
+      "SITE_ID": "175f6835",
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNzVmNjgzNSIsImV4cCI6MTc2MDcyNTI4OX0.TWTvjay-1WG2Y6K__4w2ij5VIdwdID741JCHBcoe2uI"
     },
     {
       "name": "remote2",
-      "CENTRAL_URL": "ws://127.0.0.1:8000",
-      "HTTP_URL": "http://127.0.0.1:8000",
-      "SITE_ID": "863a2efd",
-      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4NjNhMmVmZCIsImV4cCI6MTc2MDU0MDYwNn0.peuZVOz-WQniHwLIjv4gMWD4n8VX7Vh9nR33xgr37ic"
+      "CENTRAL_URL": "wss://midn-299043301932.us-east1.run.app",
+      "HTTP_URL": "https://midn-299043301932.us-east1.run.app",
+      "SITE_ID": "ae3b57ff",
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZTNiNTdmZiIsImV4cCI6MTc2MDcyNTM0MX0.aOWvkotG3pH9uik_u9b7qJmHf76kpEy5RDfgm-XtfQw"
     }
   ]
 }
