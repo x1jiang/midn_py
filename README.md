@@ -203,10 +203,15 @@ The system supports two email sending modes (see `central/app/services/user_serv
 2. Gmail Mode (send_email_alert)
    - Uses Gmail with an App Password (recommended for production trials).
    - Provides identical attachment (`approve.txt`) and subject line for parity.
-   - Configure via environment variables before starting the central server:
+   - Configure via root `.env` file or environment variables before starting the central server. The application auto-loads a `.env` at repository root (simple parser, no extra dependency):
      ```bash
      export GMAIL_USER="your_account@gmail.com"
      export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"  # 16-character app password
+     ```
+     Or create a `.env` file in the project root:
+     ```env
+     GMAIL_USER=your_account@gmail.com
+     GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
      ```
    - (Optional) You can define `GMAIL_USER` / `GMAIL_APP_PASSWORD` on the `settings` object if you extend `central/app/core/config.py`.
    - Common issues:

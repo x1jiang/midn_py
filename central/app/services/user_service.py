@@ -59,8 +59,8 @@ def send_email_alert(from_email_addr: str, to_email_addr: str, message_text: str
     """
     import os
 
-    gmail_user = os.getenv("GMAIL_USER", getattr(settings, "GMAIL_USER", "lychen9999@gmail.com"))
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", getattr(settings, "GMAIL_APP_PASSWORD", "qren xdas reda uiee"  ))
+    gmail_user = os.getenv("GMAIL_USER", getattr(settings, "GMAIL_USER", ""))
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", getattr(settings, "GMAIL_APP_PASSWORD", ""))
     if not gmail_user or not gmail_pass:
         raise RuntimeError("Gmail credentials not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD env vars.")
 
