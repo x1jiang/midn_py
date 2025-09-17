@@ -1,0 +1,41 @@
+# Google App Engine flexible environment configuration for PYMIDN
+# Uses the existing Dockerfile (custom runtime) to run all three services.
+# The platform will send traffic to $PORT (default 8080); entrypoint script maps it to CENTRAL_PORT.
+
+runtime: custom
+env: flex
+service: pymidn-central
+
+# Ensure at least one instance; adjust as needed
+manual_scaling:
+  instances: 1
+
+# Basic resources; adjust for workload
+resources:
+  cpu: 2
+  memory_gb: 4
+  disk_size_gb: 20
+
+# Environment variables passed into the container
+env_variables:
+  CENTRAL_HOST: 0.0.0.0
+  REMOTE_HOST: 0.0.0.0
+  # Force central app to bind to the platform port (GAE sets PORT)
+  CENTRAL_PORT: "8080"
+  # Optionally configure remote ports if you plan internal usage only
+  REMOTE1_PORT: "8001"
+  REMOTE2_PORT: "8002"
+
+# Optional health check config (relies on central service)
+health_check:
+  enable_health_check: True
+  check_interval_sec: 30
+  timeout_sec: 5
+  healthy_threshold: 2
+  unhealthy_threshold: 5
+
+# Network settings
+network:
+  session_affinity: false
+
+# (Optional) If you later separate remote nodes, create additional services with their own app.yaml.

@@ -106,6 +106,23 @@ Set environment variables or edit `remote/app/config.py`:
 - SITE_ID: the user’s `site_id` from central
 - TOKEN: the JWT generated above
 
+### Dynamic Central URL (Production / Cloud)
+When approving a user the system now derives the public Central URL automatically from the incoming admin request host & scheme. You normally do NOT need to set `central_url` in `.env` for production (e.g. Google Cloud Run / App Engine). If you deploy behind a custom domain or special proxy and need to override, set one of:
+
+```bash
+export central_url="https://your-custom-domain.example"
+# or
+export SERVICE_PUBLIC_URL="https://your-custom-domain.example"
+```
+
+Fallback order inside `approve_user`:
+1. Explicit argument passed from route (derived from request.base_url)
+2. `settings.CENTRAL_URL` / `central_url` env var (if not localhost)
+3. `SERVICE_PUBLIC_URL` env var
+4. Legacy default `http://127.0.0.1:8000`
+
+Emails show the resolved HTTPS base so remote sites can configure `HTTP_URL` and WebSocket URL (`wss://`).
+
 Example (shell):
 ```bash
 export CENTRAL_URL=ws://127.0.0.1:8000

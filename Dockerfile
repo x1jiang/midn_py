@@ -26,10 +26,12 @@ COPY . .
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-EXPOSE 8000 8001 8002
+# Expose the three internal service ports plus 8080 (primary for GAE routing)
+EXPOSE 8000 8001 8002 8080
 
 # Healthcheck (simple TCP check on central port)
+# Dynamic healthcheck uses CENTRAL_PORT (default 8000 / overridden by $PORT)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8000)); s.close()" || exit 1
+  CMD python -c "import os,socket,sys; p=int(os.environ.get('CENTRAL_PORT','8000')); s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',p)); s.close()" || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -26,7 +26,12 @@ def read_user(user_id: int, request: Request, db: Session = Depends(get_db)):
 @router.post("/{user_id}/approve", response_model=schemas.User)
 def approve_user(user_id: int, request: Request, db: Session = Depends(get_db)):
     require_admin(request)
-    db_user = services.user_service.approve_user(db, user_id)
+    # Build the external base URL (scheme+host) from request for email token distribution
+    base = str(request.base_url).rstrip('/')
+    # Ensure we use https if behind a proxy that forwarded original scheme (FastAPI/Starlette will honor headers if configured)
+    if base.startswith("http://") and request.headers.get("X-Forwarded-Proto") == "https":
+        base = base.replace("http://", "https://", 1)
+    db_user = services.user_service.approve_user(db, user_id, central_url=base)
     if db_user is None:
         raise HTTPException(status_code=404, detail="User not found")
     return db_user

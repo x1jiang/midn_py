@@ -280,7 +280,11 @@ async def gui_admin_approve(request: Request, user_id: int, csrf_token: str = Fo
         return RedirectResponse(url="/gui/login")
     if csrf_token != get_csrf_token(request):
         return HTMLResponse("CSRF validation failed", status_code=403)
-    db_user = services.user_service.approve_user(db, user_id)
+    # Derive external base URL (scheme+host)
+    base = str(request.base_url).rstrip('/')
+    if base.startswith("http://") and request.headers.get("X-Forwarded-Proto") == "https":
+        base = base.replace("http://", "https://", 1)
+    db_user = services.user_service.approve_user(db, user_id, central_url=base)
     if not db_user:
         return templates.TemplateResponse("confirm.html", {"request": request, "message": "User not found."})
     return templates.TemplateResponse("confirm.html", {"request": request, "message": f"Approved user {db_user.username} (site_id={db_user.site_id}). Email sent."})
@@ -854,7 +858,10 @@ async def gui_admin_sites_approve(request: Request, user_id: int, csrf_token: st
         return RedirectResponse(url="/gui/login")
     if csrf_token != get_csrf_token(request):
         return HTMLResponse("CSRF validation failed", status_code=403)
-    db_user = services.user_service.approve_user(db, user_id, expires_days=expires_days)
+    base = str(request.base_url).rstrip('/')
+    if base.startswith("http://") and request.headers.get("X-Forwarded-Proto") == "https":
+        base = base.replace("http://", "https://", 1)
+    db_user = services.user_service.approve_user(db, user_id, central_url=base, expires_days=expires_days)
     if not db_user:
         return templates.TemplateResponse("confirm.html", {"request": request, "message": "Site not found."})
     exp_ts = (datetime.utcnow() + timedelta(days=expires_days)).strftime("%Y-%m-%d %H:%M:%S UTC")

@@ -121,9 +121,16 @@ def send_email_alert_ut_smtp(from_email_addr: str, to_email_addr: str, message_t
 
 
 def approve_user(db: Session, user_id: int, central_url: str = "http://127.0.0.1:8000", expires_days: int = 30):
+    """Approve a user and email them credentials.
+
+    central_url logic:
+      - If caller passes a value different from the legacy default, use it.
+      - Else attempt to use environment variable / settings.CENTRAL_URL.
+      - If that still points to localhost while running in a hosted environment (detected via common env vars),
+        try to synthesize an https URL based on X_SERVICE_URL or similar future variable (extensible hook).
     """
-    Mark a user as approved and email them their site_id and the parent site URL.
-    """
+    import os
+
     db_user = get_user(db, user_id)
     if not db_user:
         return None
@@ -136,6 +143,21 @@ def approve_user(db: Session, user_id: int, central_url: str = "http://127.0.0.1
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+
+    # Resolve central_url dynamically if default value still in place
+    if central_url == "http://127.0.0.1:8000":
+        # Prefer settings.CENTRAL_URL if provided and not localhost
+        cfg_url = getattr(settings, "CENTRAL_URL", None)
+        if cfg_url and cfg_url not in {"http://127.0.0.1:8000", "http://localhost:8000", "ws://127.0.0.1:8000", "ws://localhost:8000"}:
+            central_url = cfg_url.replace("ws://", "http://").replace("wss://", "https://")
+        else:
+            # Check for a platform-provided base URL (placeholder for future expansion)
+            inferred = os.getenv("SERVICE_PUBLIC_URL") or os.getenv("PUBLIC_BASE_URL")
+            if inferred:
+                central_url = inferred.rstrip('/')
+            else:
+                # If running under Cloud Run / App Engine, user should set CENTRAL_URL env; keep fallback.
+                pass
 
     exp_at = db_user.jwt_expires_at.strftime("%Y-%m-%d %H:%M:%S %Z")
     message = (
