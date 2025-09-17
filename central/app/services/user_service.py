@@ -50,19 +50,16 @@ def create_user(db: Session, user: schemas.UserCreate):
 def send_email_alert(from_email_addr: str, to_email_addr: str, message_text: str):
     """Send an approval email using Gmail (app password) with approve.txt attachment.
 
-    Feature parity with send_email_alert_ut_smtp:
-      - Subject fixed to approval notification.
-      - Plain text body referencing attachment.
-      - Attachment approve.txt containing full message_text.
-    Credentials are taken from environment variables GMAIL_USER / GMAIL_APP_PASSWORD
-    or optional settings.GMAIL_USER / settings.GMAIL_APP_PASSWORD if present.
+    If Gmail creds missing, this becomes a no-op (logs and returns) instead of raising.
     """
     import os
 
-    gmail_user = os.getenv("GMAIL_USER", getattr(settings, "GMAIL_USER", ""))
-    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", getattr(settings, "GMAIL_APP_PASSWORD", ""))
-    if not gmail_user or not gmail_pass:
-        raise RuntimeError("Gmail credentials not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD env vars.")
+    if not settings.gmail_ready():
+        print("[email] Gmail credentials missing; skipping Gmail send.")
+        return
+
+    gmail_user = os.getenv("GMAIL_USER", settings.GMAIL_USER or "")
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", settings.GMAIL_APP_PASSWORD or "")
 
     msg = MIMEMultipart()
     display_from = from_email_addr or gmail_user
@@ -82,13 +79,15 @@ def send_email_alert(from_email_addr: str, to_email_addr: str, message_text: str
     part.add_header('Content-Disposition', 'attachment', filename='approve.txt')
     msg.attach(part)
 
-    # Use STARTTLS on port 587 for wider compatibility
-    with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
-        server.ehlo()
-        server.starttls()
-        server.login(gmail_user, gmail_pass)
-        server.sendmail(msg['From'], to_email_addr, msg.as_string())
-        print(f"Email (Gmail) sent to {to_email_addr}")
+    try:
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(gmail_user, gmail_pass)
+            server.sendmail(msg['From'], to_email_addr, msg.as_string())
+        print(f"[email] Gmail message sent to {to_email_addr}")
+    except Exception as e:
+        print(f"[email] Failed Gmail send: {e}")
  
 
 def send_email_alert_ut_smtp(from_email_addr: str, to_email_addr: str, message_text: str):

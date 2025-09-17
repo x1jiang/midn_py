@@ -5,8 +5,11 @@ __pycache__/
 *.db
 *.sqlite
 *.sqlite3
-.env
-.env.*
+# NOTE: For local development we allow .env to be included in the build context so
+# the image gets the Gmail credentials. For production, re-enable these lines or
+# switch to docker-compose env_file / secrets injection.
+# .env
+# .env.*
 .git
 .gitignore
 Dockerfile
