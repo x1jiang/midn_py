@@ -193,6 +193,30 @@ Use `is_binary: true` and binary target data (0/1):
 - Quorum wait: job starts only when all `participants` are connected and have sent data.
 - Email failures: check SMTP host/port in `user_service.send_email_alert`.
 
+## Email Configuration
+The system supports two email sending modes (see `central/app/services/user_service.py`):
+
+1. Test SMTP Mode (send_email_alert_ut_smtp)
+   - Uses an unencrypted test server at `129.106.31.45:7725`.
+   - Sends approval details as an attachment `approve.txt`.
+
+2. Gmail Mode (send_email_alert)
+   - Uses Gmail with an App Password (recommended for production trials).
+   - Provides identical attachment (`approve.txt`) and subject line for parity.
+   - Configure via environment variables before starting the central server:
+     ```bash
+     export GMAIL_USER="your_account@gmail.com"
+     export GMAIL_APP_PASSWORD="xxxx xxxx xxxx xxxx"  # 16-character app password
+     ```
+   - (Optional) You can define `GMAIL_USER` / `GMAIL_APP_PASSWORD` on the `settings` object if you extend `central/app/core/config.py`.
+   - Common issues:
+     - App password required (not your normal Gmail password).
+     - Ensure 2FA is enabled on the account before generating an app password.
+     - Some corporate networks block outbound SMTP (ports 465/587).
+   - The function will raise a clear error if credentials are missing.
+
+Fallback: If Gmail credentials aren’t set, user approval still succeeds but email sending will log an error.
+
 ## Project layout
 - central/app/main.py: Central FastAPI app and WebSocket endpoint
 - central/app/services/simi_service.py: SIMI orchestration (Gaussian + Logistic)

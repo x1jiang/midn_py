@@ -46,7 +46,52 @@ def create_user(db: Session, user: schemas.UserCreate):
     return db_user
 
 
+
 def send_email_alert(from_email_addr: str, to_email_addr: str, message_text: str):
+    """Send an approval email using Gmail (app password) with approve.txt attachment.
+
+    Feature parity with send_email_alert_ut_smtp:
+      - Subject fixed to approval notification.
+      - Plain text body referencing attachment.
+      - Attachment approve.txt containing full message_text.
+    Credentials are taken from environment variables GMAIL_USER / GMAIL_APP_PASSWORD
+    or optional settings.GMAIL_USER / settings.GMAIL_APP_PASSWORD if present.
+    """
+    import os
+
+    gmail_user = os.getenv("GMAIL_USER", getattr(settings, "GMAIL_USER", "lychen9999@gmail.com"))
+    gmail_pass = os.getenv("GMAIL_APP_PASSWORD", getattr(settings, "GMAIL_APP_PASSWORD", "qren xdas reda uiee"  ))
+    if not gmail_user or not gmail_pass:
+        raise RuntimeError("Gmail credentials not configured. Set GMAIL_USER and GMAIL_APP_PASSWORD env vars.")
+
+    msg = MIMEMultipart()
+    display_from = from_email_addr or gmail_user
+    msg['From'] = display_from
+    msg['To'] = to_email_addr
+    msg['Subject'] = "MIDistNet Federated Learning Remote Site Registration Approved - Do not reply"
+
+    body = (
+        "Your site has been approved. See attached approve.txt for details.\n\n"
+        "If you did not request this registration, please ignore this email."
+    )
+    msg.attach(MIMEText(body, 'plain'))
+
+    part = MIMEBase('application', 'octet-stream')
+    part.set_payload(message_text.encode('utf-8'))
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', 'attachment', filename='approve.txt')
+    msg.attach(part)
+
+    # Use STARTTLS on port 587 for wider compatibility
+    with smtplib.SMTP('smtp.gmail.com', 587, timeout=10) as server:
+        server.ehlo()
+        server.starttls()
+        server.login(gmail_user, gmail_pass)
+        server.sendmail(msg['From'], to_email_addr, msg.as_string())
+        print(f"Email (Gmail) sent to {to_email_addr}")
+ 
+
+def send_email_alert_ut_smtp(from_email_addr: str, to_email_addr: str, message_text: str):
     """
     Send an approval email with details attached as approve.txt via test SMTP.
     NOTE: Uses unencrypted SMTP on 129.106.31.45:7725 per request.
@@ -72,6 +117,7 @@ def send_email_alert(from_email_addr: str, to_email_addr: str, message_text: str
         print(f"Email sent to {to_email_addr}")
     finally:
         server.quit()
+
 
 
 def approve_user(db: Session, user_id: int, central_url: str = "http://127.0.0.1:8000", expires_days: int = 30):
