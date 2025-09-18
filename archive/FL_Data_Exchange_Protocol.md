@@ -1,3 +1,5 @@
+> Note (2025-09-18): This document is kept for historical reference. The live system follows the original R-side message structure for algorithm communication. Implement new work based on the R behavior and the SIMI/SIMICE message shapes below.
+
 **SIMI **
 Control (Central → Remote)
 
@@ -651,22 +653,5 @@ If "logistic": beta, vcov, n
 
 ---
 
-### \u2B07 Unified-Schema (2025-08-25) compatibility notes
-The Python dataclass layer (`data_protocol.py`) implements a *single* normalised wire schema that subsumes all message shapes described above.  Only naming and indexing were harmonised; the payload structure is unchanged.
-
-* Indices are **0-based** (SIMICE examples showed 1-based).
-* Methods are lower-case literals: `"gaussian"` | `"logistic"`.
-* Message names
-  * `request_statistics` → **request_info**
-  * `update_imputations` → **update_params**
-  * `iteration_complete` → **ack**
-  * `get_final_data` (unchanged)
-* The separate “Mode 1”, “Mode 2”, and “Terminate” verbs collapse into a single **iterate** message with an integer field `mode`:
-  * 1 = H, g, (Q)
-  * 2 = Q-only
-  * 0 = terminate
-* All vectors/matrices are `float64`; when flattened they use Fortran (column-major) order.
-* Predictor dimension symbol is unified as **p** (some legacy text used *q*).
-* HDMI beta blocks are transmitted as named fields: `beta_sel`, `beta_out`, `sigma`, `rho`, `vcov`.
-
-The legacy protocol descriptions above remain verbatim for historical reference; implementers writing new code should follow the field names and conventions in `data_protocol.py`.
+### Historical note
+Earlier drafts explored a unified schema. That approach is retired. Follow the original R message structures described in this document for implementation.
