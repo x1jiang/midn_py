@@ -146,7 +146,7 @@ document.addEventListener('DOMContentLoaded', function() {
             
             if (currentSiteId) {
                 // Double-check for running jobs right before submission
-                const checkUrl = addSiteIndexToUrl(`/check_running_jobs?site_id=${currentSiteId}`);
+                const checkUrl = addSiteIndexToUrl(`check_running_jobs?site_id=${currentSiteId}`);
                 fetch(checkUrl)
                     .then(response => response.json())
                     .then(data => {
@@ -217,7 +217,7 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log(`Checking for running jobs on site ${currentSiteId}...`);
         
         // Query for any running jobs on this site
-        fetch(`/check_running_jobs?site_id=${currentSiteId}`)
+    fetch(`check_running_jobs?site_id=${currentSiteId}`)
             .then(response => response.json())
             .then(data => {
                 if (data.running_job_id) {
@@ -464,7 +464,7 @@ function submitJobForm(form) {
         formData.append('current_site_id', currentSiteId);
     }
     
-    fetch('/start_job', {
+    fetch('start_job', {
         method: 'POST',
         headers: {
             'Accept': 'application/json',
@@ -570,8 +570,8 @@ function startJobMonitoring(jobId) {
         try {
             // Include site_id in the status request if available
             const url = currentSiteId ? 
-                `/job_status?job_id=${jobId}&site_id=${currentSiteId}` : 
-                `/job_status?job_id=${jobId}`;
+                `job_status?job_id=${jobId}&site_id=${currentSiteId}` : 
+                `job_status?job_id=${jobId}`;
             
             console.log(`Fetching job status from: ${url}`);
                 
@@ -737,8 +737,8 @@ function stopCurrentJob() {
 
         // Include site_id in the request if available
         const url = currentSiteId ? 
-            `/stop_job?job_id=${jobId}&site_id=${currentSiteId}` : 
-            `/stop_job?job_id=${jobId}`;
+            `stop_job?job_id=${jobId}&site_id=${currentSiteId}` : 
+            `stop_job?job_id=${jobId}`;
 
         // Send the stop request
         fetch(url, {
@@ -914,7 +914,7 @@ function refreshJobData() {
     
     // Construct the URL for fetching updated job data, preserving site_index
     const baseUrl = currentSiteId ? 
-        `/get_jobs?site_id=${currentSiteId}` : 
+    `get_jobs?site_id=${currentSiteId}` : 
         '/get_jobs';
     const url = addSiteIndexToUrl(baseUrl);
     

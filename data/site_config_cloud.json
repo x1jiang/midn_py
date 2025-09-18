@@ -1,0 +1,18 @@
+{
+  "sites": [
+    {
+      "name": "remote1",
+      "CENTRAL_URL": "wss://midn-299043301932.us-east1.run.app",
+      "HTTP_URL": "https://midn-299043301932.us-east1.run.app",
+      "SITE_ID": "a4b4447c",
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhNGI0NDQ3YyIsImV4cCI6MTc2MDc5Njc4M30.s6mx4S1UWNJoaY798Am0sNJCfuoyvIM1RZO5V64srSY"
+    },
+    {
+      "name": "remote2",
+      "CENTRAL_URL": "wss://midn-299043301932.us-east1.run.app",
+      "HTTP_URL": "https://midn-299043301932.us-east1.run.app",
+      "SITE_ID": "397b6a74",
+      "TOKEN": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzOTdiNmE3NCIsImV4cCI6MTc2MDc5NzE2M30.GSAOD4-3iTDXxw-SO1ODH_VIdZcGPO59syLkMb8NrR0"
+    }
+  ]
+}
