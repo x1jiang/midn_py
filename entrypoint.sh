@@ -4,10 +4,6 @@ set -euo pipefail
 # Allow optional environment overrides for host/ports
 CENTRAL_HOST="${CENTRAL_HOST:-0.0.0.0}"
 REMOTE_HOST="${REMOTE_HOST:-0.0.0.0}"
-# Support Google App Engine / Cloud Run style PORT variable. If $PORT is set and CENTRAL_PORT not explicitly provided, use it.
-if [ -n "${PORT:-}" ] && [ -z "${CENTRAL_PORT:-}" ]; then
-  CENTRAL_PORT="$PORT"
-fi
 CENTRAL_PORT="${CENTRAL_PORT:-8000}"
 REMOTE1_PORT="${REMOTE1_PORT:-8001}"
 REMOTE2_PORT="${REMOTE2_PORT:-8002}"
@@ -68,7 +64,7 @@ echo "Central service is ready." >&2
 for REMOTE_NAME REMOTE_PORT in "remote1 $REMOTE1_PORT" "remote2 $REMOTE2_PORT"; do
   echo "Waiting briefly for $REMOTE_NAME on 127.0.0.1:${REMOTE_PORT}..." >&2
   for i in $(seq 1 15); do
-    if python - <<'PY'
+    if CHECK_PORT="$REMOTE_PORT" python - <<'PY'
 import os, socket, sys
 host = '127.0.0.1'
 port = int(os.environ.get('CHECK_PORT'))
