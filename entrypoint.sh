@@ -61,7 +61,9 @@ fi
 echo "Central service is ready." >&2
 
 # Best-effort wait for remote1 and remote2 (do not fail if they are slow)
-for REMOTE_NAME REMOTE_PORT in "remote1 $REMOTE1_PORT" "remote2 $REMOTE2_PORT"; do
+for pair in "remote1:${REMOTE1_PORT}" "remote2:${REMOTE2_PORT}"; do
+  REMOTE_NAME="${pair%%:*}"
+  REMOTE_PORT="${pair#*:}"
   echo "Waiting briefly for $REMOTE_NAME on 127.0.0.1:${REMOTE_PORT}..." >&2
   for i in $(seq 1 15); do
     if CHECK_PORT="$REMOTE_PORT" python - <<'PY'
