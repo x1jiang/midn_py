@@ -241,6 +241,17 @@ async def gui_home(request: Request):
         resp.set_cookie(CSRF_COOKIE, token, httponly=False, samesite="lax")
     return resp
 
+# Demo page (GUI)
+@app.get("/demo", response_class=HTMLResponse)
+async def gui_demo(request: Request):
+    if not is_admin(request):
+        return RedirectResponse(url="/gui/login")
+    token = get_csrf_token(request) or gen_csrf_token()
+    resp = templates.TemplateResponse("demo.html", {"request": request, "csrf_token": token})
+    if not get_csrf_token(request):
+        resp.set_cookie(CSRF_COOKIE, token, httponly=False, samesite="lax")
+    return resp
+
 # User Registration (GUI)
 @app.get("/gui/users/register", response_class=HTMLResponse)
 async def gui_register_get(request: Request):

@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <title>Central - Demo</title>
+  <meta name="csrf-token" content="{{ csrf_token | default('') }}">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <div class="container nav">
+      <a href="/">Home</a>
+      <a href="/gui/admin/sites">Sites</a>
+      <a href="/gui/jobs">Jobs</a>
+      <a href="/gui/jobs/start">Start Job</a>
+      <a href="/demo" class="active">Demo</a>
+      <a href="/gui/logout" style="margin-left:auto">Logout</a>
+    </div>
+  </header>
+  <main class="container">
+    <div class="card">
+      <h1>Demo Guide</h1>
+      <p>This page explains the demo process and provides quick links to the two remote nodes and downloadable sample datasets.</p>
+
+      <h2>Remote endpoints</h2>
+      <ul>
+        <li><a href="/remote1/" target="_blank" rel="noopener">Remote 1</a> (served under <code>/remote1</code>)</li>
+        <li><a href="/remote2/" target="_blank" rel="noopener">Remote 2</a> (served under <code>/remote2</code>)</li>
+      </ul>
+
+      <h2>Download demo data</h2>
+      <p>These CSV files are hosted under <code>/static/demo_data</code> on the central server.</p>
+      <ul>
+        <li><a href="/static/demo_data/multi_missing_central.csv" download>multi_missing_central.csv</a></li>
+        <li><a href="/static/demo_data/multi_missing_remote1.csv" download>multi_missing_remote1.csv</a></li>
+        <li><a href="/static/demo_data/multi_missing_remote2.csv" download>multi_missing_remote2.csv</a></li>
+        <li><a href="/static/demo_data/single_missing_binary_central.csv" download>single_missing_binary_central.csv</a></li>
+        <li><a href="/static/demo_data/single_missing_binary_remote1.csv" download>single_missing_binary_remote1.csv</a></li>
+        <li><a href="/static/demo_data/single_missing_binary_remote2.csv" download>single_missing_binary_remote2.csv</a></li>
+        <li><a href="/static/demo_data/single_missing_continuous_central.csv" download>single_missing_continuous_central.csv</a></li>
+        <li><a href="/static/demo_data/single_missing_continuous_remote1.csv" download>single_missing_continuous_remote1.csv</a></li>
+        <li><a href="/static/demo_data/single_missing_continuous_remote2.csv" download>single_missing_continuous_remote2.csv</a></li>
+      </ul>
+
+      <h2>What each dataset shows</h2>
+      <ul>
+        <li><strong>Multi-missing imputation</strong>: multiple variables have missing values; assume column 1 has missing binary values, and column 7 has missing continuous values.</li>
+        <li><strong>Single-missing (binary)</strong>: only column 1 is missing and is binary.</li>
+        <li><strong>Single-missing (continuous)</strong>: only column 1 is missing and is continuous.</li>
+      </ul>
+
+      <p>Use these datasets with the Start Job page to run a SIMI/SIMICE demo across the central and two remotes.</p>
+    </div>
+  </main>
+</body>
+</html>
