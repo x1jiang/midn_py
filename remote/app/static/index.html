@@ -2,8 +2,8 @@
 <html>
 <head>
     <title>Remote Site</title>
-    <link rel="stylesheet" href="/static/styles.css">
-    <script src="/static/app.js"></script>
+    <link rel="stylesheet" href="static/styles.css">
+    <script src="static/app.js"></script>
     <style>
         .form-info {
             color: #64748b;
@@ -192,10 +192,10 @@
 </head>
 <body>
     <header class="nav">
-    <a href="/?site_index={{ active_site_index }}">Home</a>
-    <a href="/jobs?site_index={{ active_site_index }}">Jobs</a>
+    <a href="?site_index={{ active_site_index }}">Home</a>
+    <a href="jobs?site_index={{ active_site_index }}">Jobs</a>
     <span class="site-indicator">Active Site: {{ active_site }}</span>
-    <a href="/settings?site_index={{ active_site_index }}" style="margin-left:auto">Settings</a>
+    <a href="settings?site_index={{ active_site_index }}" style="margin-left:auto">Settings</a>
   </header>
     <main class="container">
       <!-- Hidden job data that will be parsed by JavaScript -->
@@ -230,7 +230,7 @@
         {% if message %}<div class="message">{{ message }}</div>{% endif %}
         <p>API Backend: <strong>{{ settings.HTTP_URL }}</strong></p>
         <p>Communication Backend: <strong>{{ settings.CENTRAL_URL }}</strong></p>
-        <p>Site Settings: <a href="/settings"><button>Edit Configuration</button></a></p>
+    <p>Site Settings: <a href="settings"><button>Edit Configuration</button></a></p>
         {% if token_expiry %}<p>Token expires at: <strong>{{ token_expiry }}</strong></p>{% endif %}
       </div>
       <div class="card">

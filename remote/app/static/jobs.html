@@ -2,7 +2,7 @@
 <html>
 <head>
   <title>Remote - Jobs</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="static/styles.css">
   <style>
     .refresh-btn {
       display: inline-block;
@@ -36,16 +36,16 @@
 </head>
 <body>
   <header class="nav">
-    <a href="/?site_index={{ active_site_index }}">Home</a>
-    <a href="/jobs?site_index={{ active_site_index }}">Jobs</a>
+  <a href="?site_index={{ active_site_index }}">Home</a>
+  <a href="jobs?site_index={{ active_site_index }}">Jobs</a>
     <span class="site-indicator">Active Site: {{ active_site }}</span>
-    <a href="/settings?site_index={{ active_site_index }}" style="margin-left:auto">Settings</a>
+  <a href="settings?site_index={{ active_site_index }}" style="margin-left:auto">Settings</a>
   </header>
   <main class="container">
     <div class="card">
       <div class="card-header">
         <h1>Assigned Jobs</h1>
-        <a href="/jobs?refresh=true" class="refresh-btn">↻ Refresh Data</a>
+  <a href="jobs?refresh=true" class="refresh-btn">↻ Refresh Data</a>
       </div>
       {% if site_name %}
       <div class="site-info-container">
