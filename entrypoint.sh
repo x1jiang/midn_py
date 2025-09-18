@@ -64,6 +64,31 @@ if [ "$CENTRAL_READY" -ne 1 ]; then
 fi
 echo "Central service is ready." >&2
 
+# Best-effort wait for remote1 and remote2 (do not fail if they are slow)
+for REMOTE_NAME REMOTE_PORT in "remote1 $REMOTE1_PORT" "remote2 $REMOTE2_PORT"; do
+  echo "Waiting briefly for $REMOTE_NAME on 127.0.0.1:${REMOTE_PORT}..." >&2
+  for i in $(seq 1 15); do
+    if python - <<'PY'
+import os, socket, sys
+host = '127.0.0.1'
+port = int(os.environ.get('CHECK_PORT'))
+s = socket.socket()
+s.settimeout(1)
+try:
+    s.connect((host, port))
+    s.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+    then
+      echo "$REMOTE_NAME ready." >&2
+      break
+    fi
+    sleep 1
+  done
+done
+
 # Start Nginx proxy on 8080 (or $PORT if platform injects it)
 NGINX_PORT="${PORT:-8080}"
 echo "Starting nginx reverse proxy on :${NGINX_PORT}" >&2
