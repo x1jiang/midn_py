@@ -45,7 +45,10 @@ class Settings:
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./central.db")
+    # Use database under repo_root/data by default (absolute path for robustness)
+    _ROOT = Path(__file__).resolve().parents[3]
+    _DEFAULT_DB = _ROOT / "data" / "central.db"
+    DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{_DEFAULT_DB}")
 
     # Admin password for GUI/API protection
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")

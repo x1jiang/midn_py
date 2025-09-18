@@ -4,7 +4,9 @@ central/app/static/results/*
 remote_runtime/jobs/*
 !remote_runtime/jobs/.gitkeep
 
-central.db
+# Local data directory artifacts
+data/central.db
+data/site_config.json
 __pycache__/
 *.py[cod]
 *$py.class

@@ -11,7 +11,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parents[2] / ".." / "central.db"
+# central/app/db/migrate_drop_legacy_columns.py -> repo_root/data/central.db
+DB_PATH = Path(__file__).resolve().parents[2] / ".." / "data" / "central.db"
 DB_PATH = DB_PATH.resolve()
 
 REMOVED_COLS = {

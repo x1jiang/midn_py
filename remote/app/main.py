@@ -60,6 +60,11 @@ async def get_site_info(site_id, active_site=None):
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request, refresh: bool = False, site_index: int = 0):
+    # Reload settings from disk to reflect external updates
+    try:
+        config.settings = config.load_settings()
+    except Exception:
+        pass
     jobs = []
     site_info = None
     message = None
@@ -124,6 +129,14 @@ async def read_root(request: Request, refresh: bool = False, site_index: int = 0
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_get(request: Request, site_index: int = 0):
+    # Always reload settings from disk to reflect external updates
+    # (the settings file may be shared across multiple instances)
+    try:
+        config.settings = config.load_settings()
+    except Exception as _e:
+        # Best-effort reload; fall back to existing in-memory settings
+        pass
+
     # Determine the active site without modifying the sites list
     active_site = None
     if 0 <= site_index < len(config.settings.sites):
@@ -195,6 +208,11 @@ async def settings_post(request: Request,
 @app.get("/get_jobs")
 async def get_jobs(site_id: Optional[str] = None, site_index: int = 0):
     """Endpoint that returns job data as JSON for AJAX requests"""
+    # Reload settings from disk to reflect external updates
+    try:
+        config.settings = config.load_settings()
+    except Exception:
+        pass
     jobs = []
     
     # Determine the active site
@@ -225,6 +243,11 @@ async def get_jobs(site_id: Optional[str] = None, site_index: int = 0):
 
 @app.get("/jobs", response_class=HTMLResponse)
 async def list_jobs(request: Request, refresh: bool = False, site_index: int = 0):
+    # Reload settings from disk to reflect external updates
+    try:
+        config.settings = config.load_settings()
+    except Exception:
+        pass
     jobs = []
     site_info = None
     message = None
@@ -520,16 +543,38 @@ async def start_job(
                 return False
 
         import importlib
+        # Use the shared Core runner with the algorithm-specific client class
+        core_mod = importlib.import_module("Core.remote_core")
+        run_core_async = getattr(core_mod, "run_remote_client_async")
+
         if algo == "SIMICE":
             parameters.setdefault("job_id", job_id)
             parameters.setdefault("site_id", active_site.SITE_ID)
-            async_mod = importlib.import_module("SIMICE.SIMICERemote")
-            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, central_proto,active_site.SITE_ID, parameters)
+            simice_mod = importlib.import_module("SIMICE.SIMICERemote")
+            ClientClass = getattr(simice_mod, "SIMICERemoteClient")
+            remote_coro = run_core_async(
+                ClientClass,
+                str(data_path),
+                central_host,
+                central_port,
+                central_proto,
+                active_site.SITE_ID,
+                parameters,
+            )
         elif algo == "SIMI":
             parameters.setdefault("job_id", job_id)
             parameters.setdefault("site_id", active_site.SITE_ID)
-            async_mod = importlib.import_module("SIMI.SIMIRemote")
-            remote_coro = async_mod.async_run_remote_client(str(data_path), central_host, central_port, central_proto,active_site.SITE_ID, parameters)
+            simi_mod = importlib.import_module("SIMI.SIMIRemote")
+            ClientClass = getattr(simi_mod, "SIMIRemoteClient")
+            remote_coro = run_core_async(
+                ClientClass,
+                str(data_path),
+                central_host,
+                central_port,
+                central_proto,
+                active_site.SITE_ID,
+                parameters,
+            )
         else:
             raise ValueError(f"Unsupported algorithm type: {algo}")
 

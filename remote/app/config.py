@@ -1,8 +1,10 @@
 import os
 import json
 
-# Define the configuration file path
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site_config.json")
+# Define the configuration file path (moved to project-root/data)
+# remote/app/config.py -> repo_root/data/site_config.json
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..",))
+CONFIG_FILE = os.path.join(_ROOT_DIR, "data", "site_config.json")
 
 class SiteConfig:
     def __init__(self, name="", central_url="ws://127.0.0.1:8000", http_url="http://127.0.0.1:8000", 
@@ -72,6 +74,8 @@ def save_settings(settings):
             "sites": sites_data
         }
         
+        # Ensure the data directory exists
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
             json.dump(data, f, indent=2)
         print(f"Settings saved to {CONFIG_FILE}")
