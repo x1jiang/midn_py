@@ -21,12 +21,11 @@ env_variables:
   CENTRAL_HOST: 0.0.0.0
   REMOTE_HOST: 0.0.0.0
   # Force central app to bind to the platform port (GAE sets PORT)
-  CENTRAL_PORT: "8080"
+  CENTRAL_PORT: "8000"
   # Optionally configure remote ports if you plan internal usage only
   REMOTE1_PORT: "8001"
   REMOTE2_PORT: "8002"
-  GMAIL_USER: "lychen9999@gmail.com"
-  GMAIL_APP_PASSWORD: "qren xdas reda uiee"  
+  
 
 # Optional health check config (relies on central service)
 health_check:

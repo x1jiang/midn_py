@@ -33,11 +33,24 @@ echo "Starting remote service instance 2 on ${REMOTE_HOST}:${REMOTE2_PORT}" >&2
 python -m uvicorn remote.app.main:app --host "$REMOTE_HOST" --port "$REMOTE2_PORT" &
 REMOTE2_PID=$!
 
+# Start Nginx proxy on 8080 (or $PORT if platform injects it)
+NGINX_PORT="${PORT:-8080}"
+echo "Starting nginx reverse proxy on :${NGINX_PORT}" >&2
+# Ensure nginx can write to runtime dirs in some minimal containers
+mkdir -p /run/nginx || true
+# Replace the 'listen 8080' if platform requires a different PORT
+if [ "$NGINX_PORT" != "8080" ]; then
+  sed -i "s/listen 8080 default_server;/listen ${NGINX_PORT} default_server;/" /etc/nginx/nginx.conf || true
+  sed -i "s/listen \[::\]:8080 default_server;/listen \[::\]:${NGINX_PORT} default_server;/" /etc/nginx/nginx.conf || true
+fi
+nginx -g 'daemon off;' &
+NGINX_PID=$!
+
 # Wait for any to exit
-wait -n $CENTRAL_PID $REMOTE1_PID $REMOTE2_PID || true
+wait -n $CENTRAL_PID $REMOTE1_PID $REMOTE2_PID $NGINX_PID || true
 
 echo "One service exited, shutting down others..." >&2
-kill -TERM $CENTRAL_PID $REMOTE1_PID $REMOTE2_PID 2>/dev/null || true
+kill -TERM $CENTRAL_PID $REMOTE1_PID $REMOTE2_PID $NGINX_PID 2>/dev/null || true
 wait || true
 
 echo "All services stopped." >&2
