@@ -33,6 +33,37 @@ echo "Starting remote service instance 2 on ${REMOTE_HOST}:${REMOTE2_PORT}" >&2
 python -m uvicorn remote.app.main:app --host "$REMOTE_HOST" --port "$REMOTE2_PORT" &
 REMOTE2_PID=$!
 
+# Wait for central to be ready before exposing Nginx on $PORT
+echo "Waiting for central service to become ready on 127.0.0.1:${CENTRAL_PORT}..." >&2
+CENTRAL_READY=0
+for i in $(seq 1 60); do
+  if python - <<'PY'
+import os, socket, sys
+host = '127.0.0.1'
+port = int(os.environ.get('CENTRAL_PORT','8000'))
+s = socket.socket()
+s.settimeout(1)
+try:
+    s.connect((host, port))
+    s.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+  then
+    CENTRAL_READY=1
+    break
+  fi
+  sleep 1
+done
+if [ "$CENTRAL_READY" -ne 1 ]; then
+  echo "Central service not ready after waiting; exiting to allow restart..." >&2
+  kill -TERM $CENTRAL_PID $REMOTE1_PID $REMOTE2_PID 2>/dev/null || true
+  wait || true
+  exit 1
+fi
+echo "Central service is ready." >&2
+
 # Start Nginx proxy on 8080 (or $PORT if platform injects it)
 NGINX_PORT="${PORT:-8080}"
 echo "Starting nginx reverse proxy on :${NGINX_PORT}" >&2
