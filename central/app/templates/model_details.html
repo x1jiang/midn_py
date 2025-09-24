@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Model Guide · Imputation Algorithms</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    :root{
+      --bg:#ffffff; --ink:#1f2937; --muted:#6b7280; --card:#f8fafc; --border:#e5e7eb; --primary:#2563eb;
+    }
+    body{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color:var(--ink); background:var(--bg); margin:0; }
+    header{ background:#0f172a; color:#fff; padding:12px 18px; }
+    header .container{ display:flex; gap:16px; align-items:center; }
+    header a{ color:#c7d2fe; text-decoration:none; }
+    header a:hover{ text-decoration:underline; }
+    main{ max-width:1000px; margin: 24px auto; padding: 0 16px; }
+    .subtle{ color:var(--muted); }
+    .card{ background:var(--card); border:1px solid var(--border); border-radius:8px; padding:16px 18px; }
+    .grid{ display:grid; gap:14px; }
+    @media (min-width: 860px){ .grid.cols-2{ grid-template-columns: 1fr 1fr; } }
+    h1{ margin: 0 0 6px; }
+    h2{ margin: 18px 0 6px; }
+    h3{ margin: 16px 0 6px; }
+    nav.quick a{ display:inline-block; margin:6px 10px 0 0; font-size: 0.95em; color: var(--primary); text-decoration:none; }
+    nav.quick a:hover{ text-decoration:underline; }
+    .model{ border-left: 4px solid var(--border); padding-left: 12px; }
+    .tag{ display:inline-block; font-size: 0.72em; padding:2px 8px; border-radius:999px; border:1px solid var(--border); background:#fff; margin-right:6px; }
+    .ok{ background:#ecfdf5; border-color:#a7f3d0; color:#065f46; }
+    .warn{ background:#fffbeb; border-color:#fde68a; color:#92400e; }
+    .no{ background:#fef2f2; border-color:#fecaca; color:#7f1d1d; }
+    table{ width:100%; border-collapse: collapse; }
+    th, td{ border:1px solid var(--border); padding:8px 10px; text-align:left; vertical-align:top; }
+    th{ background:#f3f4f6; }
+    code.k{ background:#f3f4f6; padding:1px 6px; border-radius:4px; }
+    .small{ font-size:0.9em; }
+    .muted{ color: var(--muted); }
+    .back{ display:inline-block; margin-top: 18px; color: var(--primary); text-decoration:none; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container">
+      <div style="font-weight:600;">Model Guide · Imputation Algorithms</div>
+      <div style="margin-left:auto;"><a href="/gui/jobs/start">Back to Create Job</a></div>
+    </div>
+  </header>
+  <main>
+    <h1>Choose the right model</h1>
+    <p class="subtle">This guide explains each algorithm, when to use it, and how the Create Job fields map to model parameters.</p>
+
+    <nav class="quick" aria-label="Quick navigation">
+      <a href="#decision">Decision guide</a>
+      <a href="#mechanisms">Missingness mechanisms</a>
+      <a href="#federation">Central vs Federated</a>
+      <a href="#catalog">Model catalog</a>
+      <a href="#params">Parameter reference</a>
+      <a href="#tips">Workflow tips</a>
+    </nav>
+
+    <section id="decision" class="card" style="margin-top:14px;">
+      <h2>Quick decision guide</h2>
+      <div class="grid cols-2">
+        <div>
+          <h3>By missingness mechanism</h3>
+          <table class="small">
+            <thead><tr><th>Mechanism</th><th>Recommended</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td><strong>MCAR</strong> (completely at random)</td><td>IMI, SIMI/SIMICE, AVGMMI</td><td>Simple methods suffice; pick by deployment (central vs federated).</td></tr>
+              <tr><td><strong>MAR</strong> (at random)</td><td>IMI (central), SIMI/SIMICE (federated), AVGMMI</td><td>Standard choice; SIMICE supports multiple targets.</td></tr>
+              <tr><td><strong>MNAR</strong> (not at random)</td><td><strong>HDMI</strong></td><td>Heckman-style joint selection/outcome modeling mitigates bias.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div>
+          <h3>By context</h3>
+          <table class="small">
+            <thead><tr><th>Context</th><th>Recommended</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td>All data at central</td><td>IMI</td><td>Fast, straightforward; no networking.</td></tr>
+              <tr><td>Multi‑site, share stats only</td><td>SIMI / SIMICE</td><td>Federated sufficient statistics exchange.</td></tr>
+              <tr><td>High privacy</td><td>CSLMI</td><td>Synthetic likelihood protects sensitive info.</td></tr>
+              <tr><td>Heterogeneous sites</td><td>AVGMMI</td><td>Robust by averaging site models.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="mechanisms" class="card">
+      <h2>Missingness mechanisms</h2>
+      <ul class="small">
+        <li><strong>MCAR</strong>: Probability of missingness is independent of any variables.</li>
+        <li><strong>MAR</strong>: Missingness depends only on observed variables (can be modeled with them).</li>
+        <li><strong>MNAR</strong>: Missingness depends on unobserved values themselves; requires joint selection/outcome modeling (HDMI).</li>
+      </ul>
+    </section>
+
+    <section id="federation" class="card">
+      <h2>Central vs Federated</h2>
+      <div class="grid cols-2">
+        <div>
+          <h3>Central-only</h3>
+          <p class="small">IMI runs entirely at the central site. Choose this when all data are centralized or data sharing is permitted.</p>
+          <span class="tag ok">Simple</span>
+          <span class="tag">Low overhead</span>
+        </div>
+        <div>
+          <h3>Federated</h3>
+          <p class="small">SIMI/SIMICE, CSLMI, AVGMMI, HDMI coordinate across sites via summary stats or parameters, keeping raw data local.</p>
+          <span class="tag ok">Privacy‑preserving</span>
+          <span class="tag warn">Networked</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="catalog" class="card">
+      <h2>Model catalog</h2>
+      <article class="model">
+        <h3>IMI — Independent Multiple Imputation</h3>
+        <p class="small">Central-only, supports continuous (Gaussian) and binary (logistic) targets. Assumes MAR.</p>
+        <ul class="small">
+          <li><strong>Use when</strong>: Data available centrally; quick baseline; MCAR/MAR.</li>
+          <li><strong>Inputs</strong>: single target column.</li>
+          <li><strong>Key params</strong>: <code class="k">target_column_index</code>, <code class="k">is_binary</code>, <code class="k">imputation_trials</code>.</li>
+        </ul>
+      </article>
+      <article class="model">
+        <h3>SIMI — Single‑target Federated MI</h3>
+        <p class="small">Federated analogue of IMI for one target column. Sites share sufficient statistics.</p>
+        <ul class="small">
+          <li><strong>Use when</strong>: Multi‑site; MCAR/MAR; one target.</li>
+          <li><strong>Inputs</strong>: single target column.</li>
+          <li><strong>Key params</strong>: <code class="k">target_column_index</code>, <code class="k">is_binary</code>, <code class="k">imputation_trials</code>.</li>
+        </ul>
+      </article>
+      <article class="model">
+        <h3>SIMICE — Multi‑target Federated MI</h3>
+        <p class="small">Federated MI for multiple target columns with per‑column binary flags.</p>
+        <ul class="small">
+          <li><strong>Use when</strong>: Multi‑site; MCAR/MAR; several targets with mixed types.</li>
+          <li><strong>Inputs</strong>: multiple target columns; per‑column <em>binary?</em> flags.</li>
+          <li><strong>Key params</strong>: <code class="k">target_column_indexes</code>, <code class="k">is_binary_list</code>, <code class="k">iteration_before_first_imputation</code>, <code class="k">iteration_between_imputations</code>, <code class="k">imputation_trials</code>.</li>
+        </ul>
+      </article>
+      <article class="model">
+        <h3>HDMI — Heckman‑type MI (MNAR)</h3>
+        <p class="small">Models both the selection (missingness) and outcome process. Handles MNAR via a joint model; uses probit link for selection.</p>
+        <ul class="small">
+          <li><strong>Use when</strong>: Evidence of MNAR; selection bias concerns.</li>
+          <li><strong>Inputs</strong>: single target (continuous or binary).</li>
+          <li><strong>Key params</strong>: similar to SIMI single‑target plus method choice (<em>Gaussian</em> vs <em>logistic</em>).</li>
+        </ul>
+      </article>
+      <article class="model">
+        <h3>CSLMI — Confidential Synthetic Likelihood MI</h3>
+        <p class="small">Privacy‑preserving federated MI using synthetic likelihoods; shares minimal information.</p>
+        <ul class="small">
+          <li><strong>Use when</strong>: High privacy requirements.</li>
+          <li><strong>Inputs</strong>: single target; continuous or binary.</li>
+        </ul>
+      </article>
+      <article class="model">
+        <h3>AVGMMI — Averaged Model MI</h3>
+        <p class="small">Aggregates/averages models from multiple sites for robustness to site heterogeneity.</p>
+        <ul class="small">
+          <li><strong>Use when</strong>: Federated; heterogeneous site distributions.</li>
+          <li><strong>Inputs</strong>: single target; continuous or binary.</li>
+        </ul>
+      </article>
+    </section>
+
+    <section id="params" class="card">
+      <h2>Parameter reference (maps to Create Job fields)</h2>
+      <table class="small">
+        <thead>
+          <tr><th>Create Job field</th><th>Type</th><th>Who uses it</th><th>Meaning</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code class="k">target_column_index</code></td>
+            <td>integer (1‑based)</td>
+            <td>IMI, SIMI, HDMI, CSLMI, AVGMMI</td>
+            <td>Index of the single target column. Use the Header picker to fill automatically.</td>
+          </tr>
+          <tr>
+            <td><code class="k">is_binary</code></td>
+            <td>boolean</td>
+            <td>IMI, SIMI, HDMI, CSLMI, AVGMMI</td>
+            <td>Set true for binary target (logistic/probit), false for continuous (Gaussian).</td>
+          </tr>
+          <tr>
+            <td><code class="k">target_column_indexes</code></td>
+            <td>array of integer (1‑based)</td>
+            <td>SIMICE</td>
+            <td>Indices of multiple target columns. Select via multi‑header picker.</td>
+          </tr>
+          <tr>
+            <td><code class="k">is_binary_list</code></td>
+            <td>array of boolean</td>
+            <td>SIMICE</td>
+            <td>Per‑column flags matching target_column_indexes. Use “Configure Binary Flags”.</td>
+          </tr>
+          <tr>
+            <td><code class="k">imputation_trials</code></td>
+            <td>integer ≥ 1</td>
+            <td>All models</td>
+            <td>Number of multiple imputations (M in literature).</td>
+          </tr>
+          <tr>
+            <td><code class="k">iteration_before_first_imputation</code></td>
+            <td>integer ≥ 0</td>
+            <td>SIMICE</td>
+            <td>Warm‑up iterations before first imputation draw.</td>
+          </tr>
+          <tr>
+            <td><code class="k">iteration_between_imputations</code></td>
+            <td>integer ≥ 0</td>
+            <td>SIMICE</td>
+            <td>Burn‑in/spacing iterations between draws.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Header picker usage</h3>
+      <ul class="small">
+        <li>Upload a CSV with headers on Create Job.</li>
+        <li>For single‑target models, pick one header; for SIMICE, multi‑select headers.</li>
+        <li>If SIMICE, click “Configure Binary Flags” to mark each selected column as binary or continuous.</li>
+      </ul>
+    </section>
+
+    <section id="tips" class="card">
+      <h2>Workflow tips</h2>
+      <ul class="small">
+        <li><strong>Start simple</strong>: Try IMI/SIMI first for MAR; escalate to HDMI if MNAR is suspected (e.g., missingness correlates with unobserved outcomes).</li>
+        <li><strong>Check convergence</strong>: Increase iterations for SIMICE if chains appear noisy.</li>
+        <li><strong>Site readiness</strong>: For federated runs, ensure all participant sites are approved and reachable.</li>
+        <li><strong>Binary targets</strong>: Use logistic/probit settings for 0/1 targets; ensure the header picker correctly selects those columns.</li>
+      </ul>
+      <a class="back" href="/gui/jobs/start">← Back to Create Job</a>
+    </section>
+  </main>
+</body>
+</html>

@@ -390,6 +390,13 @@ async def gui_jobs_start_get(request: Request, db: Session = Depends(get_db)):
         resp.set_cookie(CSRF_COOKIE, token, httponly=False, samesite="lax")
     return resp
 
+# Model details (GUI)
+@app.get("/gui/models/details", response_class=HTMLResponse)
+async def gui_models_details_get(request: Request):
+    if not is_admin(request):
+        return RedirectResponse(url="/gui/login")
+    return templates.TemplateResponse("model_details.html", {"request": request})
+
 # Start Job using new runner
 @app.post("/gui/jobs/start", response_class=HTMLResponse)
 async def gui_jobs_start_post(

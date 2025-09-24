@@ -24,7 +24,9 @@
   </header>
   <main class="container">
     <div class="card">
-      <h1>Create Job</h1>
+      <!-- Insert link to detailed model information page -->
+<h1>Create Job</h1>
+<p><a href="/gui/models/details" target="_blank" rel="noopener">Detailed Model Information</a></p>
       <form method="post" novalidate>
         <label>Algorithm:<br>
           <select name="algorithm" id="algo-select" required>
@@ -32,7 +34,9 @@
               <option value="{{ a }}">{{ a }}</option>
             {% endfor %}
           </select>
-        </label><br>
+        </label>
+        <button type="button" id="open-model-info" style="margin-left:10px;">Model Info</button>
+        <br>
         <label>Name:<br><input name="name" required></label><br>
         <label>Description:<br><input name="description"></label><br>
         <label>Participants (select approved sites):<br>
