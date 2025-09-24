@@ -32,6 +32,10 @@ def load_all_algorithm_schemas() -> Dict[str, Dict[str, Any]]:
             base_req = list(base_schema.get('required', []))
             derived_req = list(data.get('required', []))
             data['required'] = list(dict.fromkeys(base_req + derived_req))  # preserve order unique
+            # Inherit selected top-level fields from base if not explicitly defined in derived
+            for top_key in ('type', 'multi_column', 'ui:order', 'description'):
+                if top_key not in data and top_key in base_schema:
+                    data[top_key] = base_schema[top_key]
             schemas[name] = data
     return schemas
 

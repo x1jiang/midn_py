@@ -155,9 +155,10 @@
               input.readOnly = true;
               const btn = document.createElement('button');
               btn.type = 'button';
-              btn.textContent = 'Configure per column';
+              btn.textContent = `Configure ${algo} Binary Flags`;
               btn.className = 'config-inline';
               btn.id = 'open-binary-config';
+              btn.setAttribute('aria-label', `Configure ${algo} binary flags per selected target column`);
               wrap.appendChild(btn);
               const hint = document.createElement('div');
               hint.className = 'param-hint';
@@ -191,6 +192,19 @@
         frag.appendChild(wrap);
       });
       container.appendChild(frag);
+      // After rendering dynamic params, immediately sync current header selection into targets
+      try {
+        const multiSel = document.getElementById('simice-headers-select');
+        const tciMulti = document.getElementById('target_column_indexes');
+        const tciSingle = document.getElementById('target_column_index');
+        if (multi && multiSel && tciMulti) {
+          const vals = Array.from(multiSel.selectedOptions).map(o => o.value);
+          tciMulti.value = vals.join(',');
+        } else if (!multi && tciSingle) {
+          const simiSel = document.getElementById('simi-header-select');
+          if (simiSel) tciSingle.value = simiSel.value || '';
+        }
+      } catch(_) { /* no-op */ }
     }
   const algoSelect = document.getElementById('algo-select');
   algoSelect.addEventListener('change', (e)=> renderParams(e.target.value));
@@ -206,6 +220,13 @@
     const list = document.getElementById('binary-config-list');
   const isBinaryTextarea = document.getElementById('is_binary_list');
     if(!modal || !list || !isBinaryTextarea) return;
+    // Reflect current algorithm in the modal title for clarity
+    try {
+      const algoSel = document.getElementById('algo-select');
+      const algoName = (algoSel?.value || '').toString();
+      const titleEl = modal.querySelector('h3');
+      if (titleEl) titleEl.textContent = `Configure ${algoName} Binary Flags`;
+    } catch (_) { /* no-op */ }
     list.innerHTML='';
     const selected = getSelectedTargetHeaders();
     // Existing values
@@ -259,8 +280,15 @@
     if(existing.length > needed) existing.length = needed;
     isBinaryTextarea.value = existing.join(',');
   }
-  document.getElementById('simice-headers-select')?.addEventListener('change', syncIsBinaryLengths);
-  document.getElementById('simice-headers-select')?.addEventListener('click', syncIsBinaryLengths);
+  const simiceHeadersEl = document.getElementById('simice-headers-select');
+  const syncTargetIndexesFromHeaders = () => {
+    const idxEl = document.getElementById('target_column_indexes');
+    if (!simiceHeadersEl || !idxEl) return;
+    const vals = Array.from(simiceHeadersEl.selectedOptions).map(o => o.value);
+    idxEl.value = vals.join(',');
+  };
+  simiceHeadersEl?.addEventListener('change', () => { syncIsBinaryLengths(); syncTargetIndexesFromHeaders(); });
+  simiceHeadersEl?.addEventListener('click', () => { syncIsBinaryLengths(); syncTargetIndexesFromHeaders(); });
 
   // Client-side validation for clearer feedback (participants, SIMI required fields)
   const createForm = document.querySelector('form');
@@ -274,8 +302,9 @@
         return;
       }
       const algoSel = document.getElementById('algo-select');
-      const algoVal = (algoSel?.value || '').toUpperCase();
-      if (algoVal === 'SIMI') {
+      const schema = ALG_SCHEMAS[algoSel?.value] || {};
+      const isMulti = !!schema.multi_column;
+      if (!isMulti) {
         const tci = document.getElementById('target_column_index');
   const bin = document.getElementById('is_binary');
         const trials = document.getElementById('imputation_trials');
@@ -301,7 +330,7 @@
           trials.focus();
           return;
         }
-      } else if (algoVal === 'SIMICE') {
+      } else {
         const idxEl = document.getElementById('target_column_indexes');
   const binEl = document.getElementById('is_binary_list');
         const iter0 = document.getElementById('iteration_before_first_imputation');

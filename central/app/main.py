@@ -431,10 +431,10 @@ async def gui_jobs_start_post(
         job_dict["owner_id"] = job.owner_id
         jobs.append(job_dict)
         
-        # Start with SIMI/SIMICE by calling algorithm central directly
+        # Start with valid algorithm by calling algorithm central directly
         algorithm_name = (db_job.algorithm or "").lower()
-        if algorithm_name not in ("simi", "simice"):
-            return templates.TemplateResponse("start_job.html", {
+        if algorithm_name.lower() not in [a.lower() for a in settings._ALG]:
+             return templates.TemplateResponse("start_job.html", {
                 "request": request,
                 "csrf_token": csrf_token,
                 "jobs": jobs,
@@ -501,6 +501,10 @@ async def gui_jobs_start_post(
                     algorithm_central = importlib.import_module("SIMI.SIMICentral").simi_central
                 elif algorithm_name == "simice":
                     algorithm_central = importlib.import_module("SIMICE.SIMICECentral").simice_central
+                elif algorithm_name == "avgmmi":
+                    algorithm_central = importlib.import_module("AVGMMI.AVGMMICentral").avgmmi_central        
+                elif algorithm_name == "avgmmice":
+                    algorithm_central = importlib.import_module("AVGMMICE.AVGMMICECentral").avgmmice_central        
                 else:
                     raise ValueError(f"Unsupported algorithm {algorithm_name}")
                 # Real-time streaming capture of algorithm prints
@@ -537,7 +541,7 @@ async def gui_jobs_start_post(
                 sys.stderr = _StreamingCapture(job_id_local, "stderr")  # type: ignore
                 try:
                     # All normalization of config is deferred to the algorithm implementation
-                    imputed = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets)
+                    imputed = await algorithm_central(D=D, config=config, site_ids=site_ids, websockets=remote_websockets,debug=True)
                 finally:
                     # Flush remaining partial lines
                     try:

@@ -59,7 +59,7 @@ class Settings:
     CENTRAL_URL: str = os.getenv("central_url", "http://localhost:8000")
 
     # Supported algorithms configured here (upper-case names)
-    _ALG = ["SIMI","SIMICE"]
+    _ALG = ["SIMI","SIMICE","AVGMMI","AVGMMICE"]
 
     def gmail_ready(self) -> bool:
         return bool(self.GMAIL_USER and self.GMAIL_APP_PASSWORD)

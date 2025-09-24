@@ -262,131 +262,106 @@ function updateJobForm(jobData) {
     }
     
     console.log("Updating form for job:", job);
-    
-    let formFields = '';
-    
-    // All algorithms will have a consistent display format
-    formFields = `
+
+    // Helpers
+    const params = job.parameters || {};
+    const toTitle = (s) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+    const asArray = (v) => Array.isArray(v) ? v : (typeof v === 'string' ? v.split(',').map(x=>x.trim()).filter(Boolean) : []);
+    const isTrue = (v) => v === true || v === 'true' || v === 1 || v === '1';
+    const formatValue = (value) => {
+        if (value === null || value === undefined) return 'Not specified';
+        if (Array.isArray(value)) return value.length ? value.join(', ') : 'Empty list';
+        if (typeof value === 'object') {
+            try {
+                return JSON.stringify(value, null, 2)
+                    .replace(/[{}"]/g, '')
+                    .replace(/,/g, '')
+                    .trim() || '—';
+            } catch { return '—'; }
+        }
+        return String(value);
+    };
+
+    // Start with common hidden fields
+    let formFields = `
         <input type="hidden" name="job_type" value="${job.algorithm}">
         <input type="hidden" id="mvar" name="mvar" value="1">
     `;
-    
-    // Display variables information based on algorithm type
-    if (job.algorithm === 'SIMI') {
-        // For SIMI algorithm
-        const targetColumnIndex = job.parameters?.target_column_index || '';
-        
+
+    // Variables summary based on presence of target columns
+    const tci = params.target_column_index;
+    const tcis = asArray(params.target_column_indexes);
+    const isBin = params.is_binary; // boolean or array
+
+    const varLines = [];
+    if (tci) {
+        const bin = isTrue(isBin) ? 'Binary' : 'Continuous';
+        varLines.push(`Column ${tci} (${bin})`);
+    }
+    if (tcis.length) {
+        tcis.forEach((col, i) => {
+            let bin = 'Continuous';
+            if (Array.isArray(isBin)) bin = isTrue(isBin[i]) ? 'Binary' : 'Continuous';
+            varLines.push(`Column ${col} (${bin})`);
+        });
+    }
+    if (varLines.length) {
         formFields += `
             <div class="variables-info">
                 <p class="form-info"><strong>Available variables in this job:</strong></p>
-                <ul class="variables-list">
-                    <li>Column ${targetColumnIndex} (${job.parameters?.is_binary ? 'Binary' : 'Continuous'})</li>
-                </ul>
+                <ul class="variables-list">${varLines.map(v=>`<li>${v}</li>`).join('')}</ul>
             </div>
-            <p class="form-info">This job uses the SIMI algorithm for imputation of a single variable.</p>
-        `;
-        
-        // Display all parameters in a read-only format
-        formFields += `<div class="parameters-box">
-            <h3>All Job Parameters:</h3>
-            <table class="parameters-table">`;
-        
-        // Loop through all parameters
-        for (const [key, value] of Object.entries(job.parameters || {})) {
-            formFields += `
-                <tr>
-                    <td><strong>${key}:</strong></td>
-                    <td>${JSON.stringify(value)}</td>
-                </tr>
-            `;
-        }
-        
-        formFields += `</table></div>`;
-        
-        // Pre-set the missing variable index to the target column
-        setTimeout(() => {
-            const mvarInput = document.getElementById('mvar');
-            if (mvarInput && targetColumnIndex) {
-                mvarInput.value = targetColumnIndex;
-            }
-        }, 100);
-        
-    } else if (job.algorithm === 'SIMICE') {
-        // For SIMICE algorithm
-        const targetColumns = job.parameters?.target_column_indexes || [];
-        
-        // Show available columns information
-        if (Array.isArray(targetColumns) && targetColumns.length > 0) {
-            formFields += `
-                <div class="variables-info">
-                    <p class="form-info"><strong>Available variables in this job:</strong></p>
-                    <ul class="variables-list">
-            `;
-            
-            targetColumns.forEach((colIndex, i) => {
-                const isBinary = Array.isArray(job.parameters?.is_binary) && job.parameters.is_binary[i] 
-                    ? 'Binary' : 'Continuous';
-                formFields += `<li>Column ${colIndex} (${isBinary})</li>`;
-            });
-            
-            formFields += `
-                    </ul>
-                </div>
-            `;
-        }
-        
-        formFields += `<p class="form-info">This job uses the SIMICE algorithm for multiple imputation.</p>`;
-        
-        // Display all parameters in a read-only format
-        formFields += `<div class="parameters-box">
-            <h3 id="simice-job-params-heading">All Job Parameters:</h3>
-            <table class="parameters-table" aria-labelledby="simice-job-params-heading">
-            <tbody>`;
-        
-        // Loop through all parameters
-        for (const [key, value] of Object.entries(job.parameters || {})) {
-            const paramId = `simice-param-${key.replace(/\s+/g, '-').toLowerCase()}`;
-            formFields += `
-                <tr>
-                    <th scope="row" id="${paramId}">${key}:</th>
-                    <td aria-labelledby="${paramId}">${JSON.stringify(value)}</td>
-                </tr>
-            `;
-        }
-        
-        formFields += `</tbody></table></div>`;
-        
-        // Add other SIMICE parameters if needed
-        if (job.parameters?.iteration_before_first_imputation !== undefined) {
-            formFields += `
-                <input type="hidden" name="iteration_before_first_imputation" 
-                    value="${job.parameters.iteration_before_first_imputation}">
-            `;
-        }
-        
-        if (job.parameters?.iteration_between_imputations !== undefined) {
-            formFields += `
-                <input type="hidden" name="iteration_between_imputations" 
-                    value="${job.parameters.iteration_between_imputations}">
-            `;
-        }
-    } else {
-        // Default case for other algorithms
-        formFields = `
-            <label for="mvar"><strong>Missing Variable Index (1-based):</strong></label><br>
-            <input type="number" id="mvar" name="mvar" min="1" required><br>
-            <p class="form-info">Please enter the index of the variable you want to impute.</p>
         `;
     }
-    
-    // The CSV file input is already in the HTML, so we don't need to add it dynamically
+    // Optional small description based on algorithm (non-blocking)
+    formFields += `<p class="form-info">Algorithm: ${job.algorithm}. Parameters are preset by the central job.</p>`;
+
+    // Parameters table (ordered if param_order is present)
+    const orderedKeys = Array.isArray(job.param_order) && job.param_order.length
+        ? job.param_order.filter(k => Object.prototype.hasOwnProperty.call(params, k))
+        : Object.keys(params);
+    if (orderedKeys.length) {
+        const headingId = `job-params-heading-${job.id}`;
+        formFields += `
+            <div class="parameters-box">
+              <h3 id="${headingId}">All Job Parameters:</h3>
+              <table class="parameters-table" aria-labelledby="${headingId}">
+                <tbody>
+                  ${orderedKeys.map(key => {
+                      const label = toTitle(key);
+                      const pid = `param-${key.replace(/\s+/g,'-').toLowerCase()}`;
+                      const val = formatValue(params[key]);
+                      return `<tr><th scope="row" id="${pid}">${label}:</th><td aria-labelledby="${pid}">${val}</td></tr>`;
+                  }).join('')}
+                </tbody>
+              </table>
+            </div>
+        `;
+    }
+
+    // Include iteration params as hidden inputs if present (compat with existing backend)
+    if (params.iteration_before_first_imputation !== undefined) {
+        formFields += `<input type="hidden" name="iteration_before_first_imputation" value="${params.iteration_before_first_imputation}">`;
+    }
+    if (params.iteration_between_imputations !== undefined) {
+        formFields += `<input type="hidden" name="iteration_between_imputations" value="${params.iteration_between_imputations}">`;
+    }
+
+    // CSV guidance
     formFields += `
         <div class="form-group" style="margin-top: 20px;">
             <p class="form-info">Please upload a CSV file with your data. Missing values should be represented as empty cells or 'NA'.</p>
         </div>
     `;
-    
+
     formContainer.innerHTML = formFields;
+
+    // Pre-set mvar based on target columns (single takes precedence)
+    const mvarInput = document.getElementById('mvar');
+    if (mvarInput) {
+        if (tci) mvarInput.value = tci;
+        else if (tcis.length) mvarInput.value = tcis[0];
+    }
 }
 
 let pollingInterval;

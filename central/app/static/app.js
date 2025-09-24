@@ -902,9 +902,6 @@ document.addEventListener('DOMContentLoaded', () => {
           const value = job.parameters[key];
           // Friendly label adjustments (SIMICE now standardizes on is_binary_list)
           let labelKey = key;
-          if (job.algorithm && job.algorithm.toUpperCase() === 'SIMICE' && key === 'is_binary_list') {
-            labelKey = 'is_binary_list';
-          }
           const formattedKey = labelKey
             .replace(/_/g, ' ')
             .replace(/\b\w/g, c => c.toUpperCase());
@@ -971,19 +968,45 @@ document.addEventListener('DOMContentLoaded', () => {
   const algo = document.getElementById('algo-select');
   const simiSection = document.querySelectorAll('.section-simi');
   const simiceSection = document.querySelectorAll('.section-simice');
+  // Dynamically determine single vs multi from server-provided schemas if available
+  function deriveAlgoMode() {
+    // Try to use global ALG_SCHEMAS if defined by the page
+    let schemas = null;
+    if (typeof window !== 'undefined' && window.ALG_SCHEMAS) {
+      schemas = window.ALG_SCHEMAS;
+    } else {
+      const el = document.getElementById('alg-schemas');
+      if (el && el.textContent) {
+        try { schemas = JSON.parse(el.textContent); } catch(_) { /* ignore */ }
+      }
+    }
+    const mode = {};
+    if (schemas && typeof schemas === 'object') {
+      Object.keys(schemas).forEach(k => {
+        const sch = schemas[k] || {};
+        mode[k.toUpperCase()] = sch.multi_column ? 'multi' : 'single';
+      });
+    }  
+    return mode;
+  }
+  function isMultiAlgo(name) {
+    const m = deriveAlgoMode();
+    return m[(name || '').toUpperCase()] === 'multi';
+  }
   const toggleSections = () => {
     const v = (algo?.value || '').toUpperCase();
-    simiSection.forEach(el => el.style.display = (v === 'SIMICE') ? 'none' : 'block');
-    simiceSection.forEach(el => el.style.display = (v === 'SIMICE') ? 'block' : 'none');
+    const isMulti = isMultiAlgo(v);
+    simiSection.forEach(el => el && (el.style.display = isMulti ? 'none' : 'block'));
+    simiceSection.forEach(el => el && (el.style.display = isMulti ? 'block' : 'none'));
+    if (typeof unifiedHeaderSync === 'function') unifiedHeaderSync();
   };
   if (algo) { algo.addEventListener('change', toggleSections); toggleSections(); }
 
   // CSV header picker
   const fileInput = document.getElementById('header-file');
   const simiHeader = document.getElementById('simi-header-select');
-  const simiIndex = document.getElementById('target_column_index');
   const simiceHeaders = document.getElementById('simice-headers-select');
-  const simiceIndexes = document.getElementById('target_column_indexes');
+  // Note: target_column_indexes is rendered dynamically; don't capture once. Always query when needed.
   const openBinaryBtn = document.getElementById('open-binary-modal');
   const binaryModal = document.getElementById('binary-modal');
   const binaryClose = document.getElementById('binary-modal-close');
@@ -993,9 +1016,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const isBinaryListInput = document.getElementById('is_binary_list');
 
   function parseCSVHeaders(text) {
-    // simple split by first newline, handle quotes minimally
-    const firstLine = text.split(/\r?\n/)[0] || '';
-    // split by comma not inside quotes
+    // Robustly grab the first non-empty line (skip BOM/blank lines)
+    const lines = String(text || '')
+      .split(/\r?\n/)
+      .map(l => l.replace(/^\uFEFF/, '')); // strip BOM if present
+    const firstLine = (lines.find(l => l.trim().length > 0) || '');
+    // Split by commas not inside quotes (minimal CSV parsing)
     const headers = [];
     let current = '';
     let inQuotes = false;
@@ -1006,7 +1032,21 @@ document.addEventListener('DOMContentLoaded', () => {
       else current += c;
     }
     headers.push(current.trim());
+    console.log('Parsed CSV headers:', headers);
     return headers.filter(h => h.length > 0);
+  }
+
+  // Ensure the correct header picker (single vs multi) is visible based on current algorithm
+  function ensureHeaderPickerVisibility() {
+    const algoSel = document.getElementById('algo-select');
+    const val = (algoSel?.value || '').toUpperCase();
+    const singleLabel = document.getElementById('header-picker-label');
+    const multiLabel = document.getElementById('header-picker-label-multi');
+    const isMulti = isMultiAlgo(val);
+    if (singleLabel && multiLabel) {
+      singleLabel.style.display = isMulti ? 'none' : 'block';
+      multiLabel.style.display = isMulti ? 'block' : 'none';
+    }
   }
 
   function populateHeaders(headers) {
@@ -1028,19 +1068,21 @@ document.addEventListener('DOMContentLoaded', () => {
         simiceHeaders.appendChild(opt2);
       }
     });
+    // Make sure the right header picker is visible for the selected algorithm
+    ensureHeaderPickerVisibility();
     // Set defaults into inputs once populated
-    if (simiHeader && simiIndex && simiHeader.options.length > 0) {
+    if (simiHeader && simiHeader.options.length > 0) {
       if (simiHeader.selectedIndex < 0) simiHeader.selectedIndex = 0;
-      simiIndex.value = simiHeader.value || '';
+      const tci = document.getElementById('target_column_index');
+      if (tci) tci.value = simiHeader.value || '';
     }
-    if (simiceHeaders && simiceIndexes) {
+    if (simiceHeaders) {
       // Auto-select first option if none selected to give a starting value
       if (simiceHeaders.selectedOptions.length === 0 && simiceHeaders.options.length > 0) {
         simiceHeaders.options[0].selected = true;
       }
       const sel = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
-      simiceIndexes.value = sel.join(',');
-      // Also update textarea param if present
+      // Update the dynamic textarea if present
       const paramMulti = document.getElementById('target_column_indexes');
       if (paramMulti) {
         paramMulti.value = sel.join(',');
@@ -1062,18 +1104,20 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // keep inputs synced when selection changes
-  if (simiHeader && simiIndex) {
-    const syncSimi = () => { simiIndex.value = simiHeader.value || ''; };
+  if (simiHeader) {
+    const syncSimi = () => {
+      const tci = document.getElementById('target_column_index');
+      if (tci) tci.value = simiHeader.value || '';
+    };
     simiHeader.addEventListener('change', syncSimi);
     simiHeader.addEventListener('input', syncSimi);
     simiHeader.addEventListener('click', syncSimi);
   }
-  if (simiceHeaders && simiceIndexes) {
+  if (simiceHeaders) {
     const syncSimice = () => {
       const vals = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
-      simiceIndexes.value = vals.join(',');
-  const paramMulti = document.getElementById('target_column_indexes');
-  if (paramMulti) paramMulti.value = vals.join(',');
+      const paramMulti = document.getElementById('target_column_indexes');
+      if (paramMulti) paramMulti.value = vals.join(',');
     };
     simiceHeaders.addEventListener('change', syncSimice);
     simiceHeaders.addEventListener('input', syncSimice);
@@ -1097,14 +1141,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const current = (algoSelect?.value || '').toUpperCase();
     const targetSingle = document.getElementById('target_column_index');
     const targetMulti = document.getElementById('target_column_indexes');
-    if (current === 'SIMICE') {
-      if (simiceHeaders && targetMulti) {
-        const vals = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
+    // Query header selects locally to avoid TDZ with top-level consts
+    const simiHeaderEl = document.getElementById('simi-header-select');
+    const simiceHeadersEl = document.getElementById('simice-headers-select');
+    // If multi-column target field exists, sync multi; otherwise sync single
+    if (targetMulti) {
+      if (simiceHeadersEl) {
+        const vals = Array.from(simiceHeadersEl.selectedOptions).map(o => o.value);
         targetMulti.value = vals.join(',');
       }
     } else { // default single
-      if (simiHeader && targetSingle) {
-        targetSingle.value = simiHeader.value || '';
+      if (simiHeaderEl && targetSingle) {
+        targetSingle.value = simiHeaderEl.value || '';
       }
     }
   }
@@ -1118,7 +1166,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const syncSimiceIndexes = () => {
     const vals = Array.from(simiceHeaders.selectedOptions).map(o => o.value);
-    simiceIndexes.value = vals.join(',');
+    const paramMulti = document.getElementById('target_column_indexes');
+    if (paramMulti) paramMulti.value = vals.join(',');
   };
 
   const openBinaryModal = () => {

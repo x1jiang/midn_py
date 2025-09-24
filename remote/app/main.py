@@ -547,36 +547,33 @@ async def start_job(
         core_mod = importlib.import_module("Core.remote_core")
         run_core_async = getattr(core_mod, "run_remote_client_async")
 
-        if algo == "SIMICE":
-            parameters.setdefault("job_id", job_id)
-            parameters.setdefault("site_id", active_site.SITE_ID)
-            simice_mod = importlib.import_module("SIMICE.SIMICERemote")
-            ClientClass = getattr(simice_mod, "SIMICERemoteClient")
-            remote_coro = run_core_async(
-                ClientClass,
-                str(data_path),
-                central_host,
-                central_port,
-                central_proto,
-                active_site.SITE_ID,
-                parameters,
-            )
-        elif algo == "SIMI":
-            parameters.setdefault("job_id", job_id)
-            parameters.setdefault("site_id", active_site.SITE_ID)
-            simi_mod = importlib.import_module("SIMI.SIMIRemote")
-            ClientClass = getattr(simi_mod, "SIMIRemoteClient")
-            remote_coro = run_core_async(
-                ClientClass,
-                str(data_path),
-                central_host,
-                central_port,
-                central_proto,
-                active_site.SITE_ID,
-                parameters,
-            )
-        else:
+        # Compact dispatch table to avoid duplication
+        CLIENTS: dict[str, tuple[str, str]] = {
+            "SIMICE": ("SIMICE.SIMICERemote", "SIMICERemoteClient"),
+            "SIMI": ("SIMI.SIMIRemote", "SIMIRemoteClient"),
+            "AVGMMI": ("AVGMMI.AVGMMIRemote", "AVGMMIRemoteClient"),
+            "AVGMMICE": ("AVGMMICE.AVGMMICERemote", "AVGMMICERemoteClient"),
+        }
+
+        if algo not in CLIENTS:
             raise ValueError(f"Unsupported algorithm type: {algo}")
+
+        # Common parameter defaults
+        parameters.setdefault("job_id", job_id)
+        parameters.setdefault("site_id", active_site.SITE_ID)
+
+        mod_path, cls_name = CLIENTS[algo]
+        algo_mod = importlib.import_module(mod_path)
+        ClientClass = getattr(algo_mod, cls_name)
+        remote_coro = run_core_async(
+            ClientClass,
+            str(data_path),
+            central_host,
+            central_port,
+            central_proto,
+            active_site.SITE_ID,
+            parameters,
+        )
 
         async def _run_with_capture():
             orig_stdout, orig_stderr = sys.stdout, sys.stderr
