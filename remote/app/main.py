@@ -553,6 +553,11 @@ async def start_job(
             "SIMI": ("SIMI.SIMIRemote", "SIMIRemoteClient"),
             "AVGMMI": ("AVGMMI.AVGMMIRemote", "AVGMMIRemoteClient"),
             "AVGMMICE": ("AVGMMICE.AVGMMICERemote", "AVGMMICERemoteClient"),
+            "HDMI": ("HDMI.HDMIRemote", "HDMIRemoteClient"),
+            "CSLMI": ("CSLMI.CSLMIRemote", "CSLMIRemoteClient"),
+            "CSLMICE": ("CSLMICE.CSLMICERemote", "CSLMICERemoteClient"),
+            "IMI": ("IMI.IMIRemote", "IMIRemoteClient"),
+            "IMICE": ("IMICE.IMICERemote", "IMICERemoteClient"),
         }
 
         if algo not in CLIENTS:

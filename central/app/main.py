@@ -504,7 +504,17 @@ async def gui_jobs_start_post(
                 elif algorithm_name == "avgmmi":
                     algorithm_central = importlib.import_module("AVGMMI.AVGMMICentral").avgmmi_central        
                 elif algorithm_name == "avgmmice":
-                    algorithm_central = importlib.import_module("AVGMMICE.AVGMMICECentral").avgmmice_central        
+                    algorithm_central = importlib.import_module("AVGMMICE.AVGMMICECentral").avgmmice_central   
+                elif algorithm_name == "hdmi":
+                    algorithm_central = importlib.import_module("HDMI.HDMICentral").hdmi_central        
+                elif algorithm_name == "cslmi":
+                    algorithm_central = importlib.import_module("CSLMI.CSLMICentral").cslmi_central        
+                elif algorithm_name == "cslmice":
+                    algorithm_central = importlib.import_module("CSLMICE.CSLMICECentral").cslmice_central        
+                elif algorithm_name == "imi":
+                    algorithm_central = importlib.import_module("IMI.IMICentral").imi_central        
+                elif algorithm_name == "imice":
+                    algorithm_central = importlib.import_module("IMICE.IMICECentral").imice_central
                 else:
                     raise ValueError(f"Unsupported algorithm {algorithm_name}")
                 # Real-time streaming capture of algorithm prints
