@@ -51,7 +51,7 @@ class Settings:
     DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{_DEFAULT_DB}")
 
     # Admin password for GUI/API protection
-    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin@!23")
 
     # Optional Gmail credentials (used by send_email_alert)
     GMAIL_USER: Optional[str] = os.getenv("GMAIL_USER")
