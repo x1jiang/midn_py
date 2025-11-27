@@ -270,25 +270,25 @@ See [`DEMO.md`](DEMO.md) for testing instructions.
 
 ## 📝 Next Steps for Team
 
-### For Ivan (Vantage6 Integration)
-1. Review `vantage6_algorithms/` structure
-2. Test algorithms in vantage6 local simulator
-3. Verify master/RPC function wrapping
-4. Optimize Docker images
-5. Coordinate with Luyao for testing
+### Vantage6 Integration Tasks
+- [ ] Review `vantage6_algorithms/` structure
+- [ ] Test algorithms in vantage6 local simulator
+- [ ] Verify master/RPC function wrapping
+- [ ] Optimize Docker images
+- [ ] Coordinate testing efforts
 
-### For Luyao (Testing Partner)
-1. Set up vantage6 local simulator
-2. Test algorithms with dummy data
-3. Validate results and provide feedback
-4. Test edge cases and error handling
-5. Document findings and issues
+### Testing & Validation Tasks
+- [ ] Set up vantage6 local simulator
+- [ ] Test algorithms with dummy data
+- [ ] Validate results and provide feedback
+- [ ] Test edge cases and error handling
+- [ ] Document findings and issues
 
-### For All Contributors
-1. Review and test current implementations
-2. Report issues and suggest improvements
-3. Contribute to documentation
-4. Share test results and feedback
+### General Contribution Tasks
+- [ ] Review and test current implementations
+- [ ] Report issues and suggest improvements
+- [ ] Contribute to documentation
+- [ ] Share test results and feedback
 
 ---
 
