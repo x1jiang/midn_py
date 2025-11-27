@@ -1,0 +1,31 @@
+{
+  "description": "MIDN Algorithm Testing Simulator",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "name": "central",
+      "data": "/Users/xiaoqianjiang/Dropbox/cursor_projects/mac/midn_py/vantage6_simulator_test/test_data/central_data.csv",
+      "port": 5001
+    },
+    {
+      "name": "remote1",
+      "data": "/Users/xiaoqianjiang/Dropbox/cursor_projects/mac/midn_py/vantage6_simulator_test/test_data/remote1_data.csv",
+      "port": 5002
+    },
+    {
+      "name": "remote2",
+      "data": "/Users/xiaoqianjiang/Dropbox/cursor_projects/mac/midn_py/vantage6_simulator_test/test_data/remote2_data.csv",
+      "port": 5003
+    }
+  ],
+  "algorithms": {
+    "simi": {
+      "image": "simi-algorithm:latest",
+      "description": "Single Imputation for Missing Data"
+    },
+    "simice": {
+      "image": "simice-algorithm:latest",
+      "description": "Single Imputation for Multiple Columns"
+    }
+  }
+}
