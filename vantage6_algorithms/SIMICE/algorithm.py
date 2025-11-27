@@ -309,14 +309,15 @@ def _simice_iteration(client: AlgorithmClient, D: np.ndarray, mvar_py: List[int]
             H = (X.T * w) @ X
             g = X.T @ (y - pr)
             
-        for result in results:
-            remote_stats = result.get('result', {}).get(f'col_{idx}', {})
-            remote_H = remote_stats.get('H', [])
-            remote_g = remote_stats.get('g', [])
-            if remote_H and len(remote_H) > 0:
-                H += np.array(remote_H)
-            if remote_g and len(remote_g) > 0:
-                g += np.array(remote_g)
+            # Aggregate remote statistics for logistic
+            for result in results:
+                remote_stats = result.get('result', {}).get(f'col_{idx}', {})
+                remote_H = remote_stats.get('H', [])
+                remote_g = remote_stats.get('g', [])
+                if remote_H and len(remote_H) > 0:
+                    H += np.array(remote_H)
+                if remote_g and len(remote_g) > 0:
+                    g += np.array(remote_g)
             
             # Update
             try:
