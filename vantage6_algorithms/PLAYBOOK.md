@@ -147,6 +147,27 @@ python test_local.py
 # ✓ PASSED: SIMICE
 ```
 
+### Step 5: Test with Local Simulator (Optional)
+
+For testing with multiple nodes using local CSV files:
+
+```bash
+# Navigate to simulator directory
+cd ../vantage6_simulator_test
+
+# Setup test data (creates central + 2 remote node CSV files)
+python3 simulator_setup.py
+
+# Run simulator tests
+python3 simulator_test.py
+
+# Expected: Both SIMI and SIMICE work correctly
+# ✓ SIMI test completed successfully
+# ✓ SIMICE test completed successfully
+```
+
+This uses a mock vantage6 client to simulate the federated learning workflow without requiring a full vantage6 server installation.
+
 ---
 
 ## Algorithm Details
@@ -246,6 +267,11 @@ python test_comprehensive.py
 
 # With real data (if sample files exist)
 python test_with_real_data.py
+
+# Local simulator tests (multiple nodes with CSV files)
+cd ../vantage6_simulator_test
+python3 simulator_setup.py    # Setup test data
+python3 simulator_test.py     # Run simulator tests
 ```
 
 ### Test Coverage
@@ -284,6 +310,20 @@ The test suite generates synthetic data with:
 - Configurable missing rates
 - Both continuous and binary variables
 - Realistic correlations
+
+#### Local Simulator Test Data
+
+The `vantage6_simulator_test/` directory provides:
+- **Setup script**: `simulator_setup.py` generates test CSV files
+- **Test data**: Central node (with missing values) + 2 remote nodes
+- **Mock client**: Simulates vantage6 RPC pattern without full server
+- **Usage**: Perfect for testing algorithms with multiple "nodes" locally
+
+```bash
+cd vantage6_simulator_test
+python3 simulator_setup.py  # Creates test_data/*.csv
+python3 simulator_test.py   # Tests with mock vantage6 client
+```
 
 #### Real Sample Data (Optional)
 
@@ -714,6 +754,12 @@ vantage6_algorithms/
 ---
 
 ## Version History
+
+- **v1.0.1** (2025-11-27): Local Simulator Testing
+  - Added local simulator testing setup
+  - Fixed SIMICE bug (H/g variable initialization)
+  - Both algorithms verified working in simulator
+  - Mock vantage6 client for local testing
 
 - **v1.0.0** (2025-11-20): Initial release
   - SIMI and SIMICE algorithms
