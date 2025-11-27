@@ -70,14 +70,6 @@ We're working collaboratively to migrate and test the MIDN algorithms in the van
 
 ---
 
-## 👥 Team & Roles
-
-- **Ivan**: Vantage6 integration specialist - wrapping algorithms into vantage6 format
-- **Luyao**: Testing partner - validating algorithms and providing feedback
-- **x1jiang**: Project maintainer - coordination and development
-
----
-
 ## 🏗️ Project Structure
 
 ```
