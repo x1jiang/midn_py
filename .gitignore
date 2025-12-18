@@ -3,13 +3,13 @@ central/app/static/results/*
 !central/app/static/results/.gitkeep
 remote_runtime/jobs/*
 !remote_runtime/jobs/.gitkeep
+__pycache__/
+*.py[cod]
+*$py.class
 
 # Local data directory artifacts
 data/central.db
 data/site_config.json
-__pycache__/
-*.py[cod]
-*$py.class
 
 # C extensions
 *.so
@@ -106,3 +106,11 @@ logs/
 # Local configuration
 instance/
 .webassets-cache
+
+# Node config files
+alpha.yaml
+beta.yaml
+gamma.yaml
+
+# Other tooling
+.psi-ignore
