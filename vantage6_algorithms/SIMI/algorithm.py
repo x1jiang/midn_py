@@ -11,24 +11,36 @@ from typing import Dict, Any, List
 from scipy.linalg import cholesky, cho_solve
 from scipy.special import expit
 import json
+from vantage6.algorithm.tools.util import info, warn, error
 
-# Import vantage6 tools
-try:
-    from vantage6.algorithm.tools import AlgorithmClient
-    from vantage6.algorithm.tools.decorators import algorithm_client
-except ImportError:
-    # Fallback for local testing
-    print("Warning: vantage6 not installed. Using mock interface.")
-    class AlgorithmClient:
-        def __init__(self, *args, **kwargs):
-            pass
-        def get_data(self, *args, **kwargs):
-            return None
-        def create_new_task(self, *args, **kwargs):
-            return None
+# Import vantage6 tools (AlgorithmClient lives in vantage6.algorithm.client)
+from vantage6.algorithm.client import AlgorithmClient
+from vantage6.algorithm.tools.decorators import algorithm_client, data
 
 
-def RPC_simi_remote_gaussian(data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+def _to_serializable(obj):
+    """Recursively convert numpy/pandas objects to JSON-serializable types."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, pd.DataFrame):
+        return obj.values.tolist()
+    if isinstance(obj, pd.Series):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+    return obj
+
+
+def _create_and_wait(client: AlgorithmClient, input_: Dict[str, Any], org_ids: List[int] | None = None):
+    """Dispatch a task and wait for results using the current AlgorithmClient API."""
+    clean_input = _to_serializable(input_)
+    task = client.task.create(input_=clean_input, organizations=org_ids or [])
+    return client.wait_for_results(task_id=task.get("id"), interval=1)
+
+@data(1)
+def simi_remote_gaussian(data: pd.DataFrame, mvar: int, *args, **kwargs) -> Dict[str, Any]:
     """
     Remote function for Gaussian method in SIMI.
     
@@ -44,24 +56,16 @@ def RPC_simi_remote_gaussian(data: Dict[str, Any], *args, **kwargs) -> Dict[str,
     --------
     dict with keys: n, XX, Xy, yy
     """
-    # Extract data
-    if isinstance(data, dict):
-        dataset = data.get('data')
-        mvar_1based = data.get('mvar', data.get('target_column_index', 1))
+    # Load data (vantage6 @data provides a DataFrame; keep ndarray fallback)
+    if isinstance(data, pd.DataFrame):
+        D = data.values
+    elif isinstance(data, np.ndarray):
+        D = data
     else:
-        dataset = data
-        mvar_1based = kwargs.get('mvar', kwargs.get('target_column_index', 1))
-    
-    # Load data if path provided
-    if isinstance(dataset, str):
-        D = pd.read_csv(dataset).values
-    elif isinstance(dataset, np.ndarray):
-        D = dataset
-    else:
-        raise ValueError("Data must be numpy array or CSV path")
+        raise ValueError("Data must be numpy array or DataFrame")
     
     # Convert to 0-based index
-    mvar = int(mvar_1based) - 1
+    mvar = int(mvar) - 1
     
     # Extract complete cases
     miss = np.isnan(D[:, mvar])
@@ -87,7 +91,8 @@ def RPC_simi_remote_gaussian(data: Dict[str, Any], *args, **kwargs) -> Dict[str,
     }
 
 
-def RPC_simi_remote_logistic(data: Dict[str, Any], beta: List[float], mode: int, *args, **kwargs) -> Dict[str, Any]:
+@data(1)
+def simi_remote_logistic(data: pd.DataFrame, beta: List[float], mode: int, mvar: int, *args, **kwargs) -> Dict[str, Any]:
     """
     Remote function for Logistic method in SIMI.
     
@@ -109,23 +114,15 @@ def RPC_simi_remote_logistic(data: Dict[str, Any], beta: List[float], mode: int,
     if mode == 0:
         return {'status': 'terminated'}
     
-    # Extract data
-    if isinstance(data, dict):
-        dataset = data.get('data')
-        mvar_1based = data.get('mvar', data.get('target_column_index', 1))
+    # Load data (vantage6 @data provides a DataFrame; keep ndarray fallback)
+    if isinstance(data, pd.DataFrame):
+        D = data.values
+    elif isinstance(data, np.ndarray):
+        D = data
     else:
-        dataset = data
-        mvar_1based = kwargs.get('mvar', kwargs.get('target_column_index', 1))
+        raise ValueError("Data must be numpy array or DataFrame")
     
-    # Load data
-    if isinstance(dataset, str):
-        D = pd.read_csv(dataset).values
-    elif isinstance(dataset, np.ndarray):
-        D = dataset
-    else:
-        raise ValueError("Data must be numpy array or CSV path")
-    
-    mvar = int(mvar_1based) - 1
+    mvar = int(mvar) - 1
     beta = np.array(beta)
     
     # Extract complete cases
@@ -163,8 +160,7 @@ def RPC_simi_remote_logistic(data: Dict[str, Any], beta: List[float], mode: int,
     
     return result
 
-
-def master_simi(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+def master_simi(client: AlgorithmClient, data: Dict[str, Any], org_ids: List[int], *args, **kwargs) -> Dict[str, Any]:
     """
     Master function for SIMI algorithm in vantage6.
     
@@ -190,13 +186,11 @@ def master_simi(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs) 
     config = kwargs.copy()
     config.update(data if isinstance(data, dict) else {})
     
-    # Load central data
-    if isinstance(config.get('data'), str):
-        D = pd.read_csv(config['data']).values.astype(float)
-    elif isinstance(config.get('data'), np.ndarray):
-        D = config['data'].astype(float)
-    else:
-        raise ValueError("Central data must be provided")
+    info("SIMI master: starting imputation")
+    # Determine central data: prefer explicit config['data'], otherwise use positional data
+    dataset = config.get('data', data)
+    D = dataset.values.astype(float)
+
     
     # Normalize parameters
     mvar_1based = config.get('target_column_index', config.get('mvar', 1))
@@ -213,6 +207,7 @@ def master_simi(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs) 
     miss = np.isnan(D[:, mvar])
     nm = np.sum(miss)
     nc = D.shape[0] - nm
+    info(f"SIMI master: target col={mvar_1based}, rows={D.shape[0]}, missing={nm}, complete={nc}")
     
     if nm == 0:
         print("No missing values found. Returning original data.")
@@ -223,9 +218,11 @@ def master_simi(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs) 
     
     # Aggregate statistics from remote nodes
     if method == 'Gaussian':
-        SI = _aggregate_gaussian_stats(client, X_central, y_central, config)
+        info("SIMI master: aggregating Gaussian stats")
+        SI = _aggregate_gaussian_stats(client, X_central, y_central, config, org_ids)
     else:  # logistic
-        SI = _aggregate_logistic_stats(client, X_central, y_central, config)
+        info("SIMI master: aggregating Logistic stats")
+        SI = _aggregate_logistic_stats(client, X_central, y_central, config, org_ids)
     
     # Perform imputation
     imputed_datasets = []
@@ -249,10 +246,11 @@ def master_simi(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs) 
         
         imputed_datasets.append(D_imputed.tolist())
     
+    info("SIMI master: finished imputations")
     return {'imputed_datasets': imputed_datasets}
 
 
-def _aggregate_gaussian_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndarray, config: Dict) -> Dict[str, Any]:
+def _aggregate_gaussian_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndarray, config: Dict, org_ids: List[int]) -> Dict[str, Any]:
     """Aggregate Gaussian statistics from remote nodes."""
     # Central statistics
     XX = X.T @ X
@@ -260,29 +258,32 @@ def _aggregate_gaussian_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndar
     yy = np.sum(y ** 2)
     n = X.shape[0]
     
-    # Request statistics from remote nodes
+    info("SIMI Gaussian: dispatching remote stats")
     task_input = {
         'method': 'Gaussian',
         'mvar': config.get('target_column_index', config.get('mvar', 1)),
-        'data': config.get('data')  # Pass data reference
     }
     
     # Call remote function on all nodes
-    results = client.create_new_task(
-        input_={
+    results = _create_and_wait(
+        client,
+        {
             'method': 'simi_remote_gaussian',
             'args': [],
             'kwargs': task_input
         },
-        organization_ids=[]  # Empty = all organizations
+        org_ids=org_ids
     )
     
     # Aggregate results
     for result in results:
         remote_stats = result.get('result', {})
-        n += remote_stats.get('n', 0)
-        XX += np.array(remote_stats.get('XX', []))
-        Xy += np.array(remote_stats.get('Xy', []))
+        remote_XX = np.array(remote_stats.get('XX', []))
+        remote_Xy = np.array(remote_stats.get('Xy', []))
+        if remote_XX.shape == XX.shape:
+            XX += remote_XX
+        if remote_Xy.shape == Xy.shape:
+            Xy += remote_Xy
         yy += remote_stats.get('yy', 0)
     
     # Compute final statistics
@@ -311,7 +312,7 @@ def _aggregate_gaussian_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndar
     }
 
 
-def _aggregate_logistic_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndarray, config: Dict) -> Dict[str, Any]:
+def _aggregate_logistic_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndarray, config: Dict, org_ids: List[int]) -> Dict[str, Any]:
     """Aggregate logistic statistics from remote nodes using iterative optimization."""
     p = X.shape[1]
     beta = np.zeros(p)
@@ -323,15 +324,16 @@ def _aggregate_logistic_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndar
     
     # Get total sample size from remotes
     # First call with mode=0 to get sample size
-    size_results = client.create_new_task(
-        input_={
+    size_results = _create_and_wait(
+        client,
+        {
             'method': 'simi_remote_logistic',
             'args': [[0.0] * p, 0],  # beta=zeros, mode=0 (get sample size)
             'kwargs': {
                 'mvar': config.get('target_column_index', config.get('mvar', 1))
             }
         },
-        organization_ids=[]
+        org_ids=org_ids
     )
     
     for result in size_results:
@@ -347,21 +349,26 @@ def _aggregate_logistic_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndar
         g = np.dot(X.T, (y - pr)) - N * lam * beta
         
         # Aggregate from remotes
-        remote_results = client.create_new_task(
-            input_={
+        remote_results = _create_and_wait(
+            client,
+            {
                 'method': 'simi_remote_logistic',
                 'args': [beta.tolist(), 1],  # mode=1: compute H and g
                 'kwargs': {
                     'mvar': config.get('target_column_index', config.get('mvar', 1))
                 }
             },
-            organization_ids=[]
+            org_ids=org_ids
         )
         
         for result in remote_results:
             remote_stats = result.get('result', {})
-            H += np.array(remote_stats.get('H', []))
-            g += np.array(remote_stats.get('g', []))
+            rH = np.array(remote_stats.get('H', []))
+            rg = np.array(remote_stats.get('g', []))
+            if rH.shape == H.shape:
+                H += rH
+            if rg.shape == g.shape:
+                g += rg
         
         # Update beta
         try:
@@ -408,25 +415,3 @@ def _aggregate_logistic_stats(client: AlgorithmClient, X: np.ndarray, y: np.ndar
         'vcov': vcov,
         'n': N
     }
-
-
-# Vantage6 entry point
-# This follows vantage6's algorithm wrapper pattern
-# See: https://docs.vantage6.ai/en/main/algorithm-development/algorithm-development-step-by-step-guide.html
-
-if __name__ == "__main__":
-    from vantage6.algorithm.tools import AlgorithmClient
-    from vantage6.algorithm.tools.decorators import algorithm_client
-    
-    @algorithm_client
-    def main(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs):
-        """
-        Main entry point for vantage6.
-        
-        This function is called by vantage6 when the algorithm is executed.
-        It receives:
-        - client: AlgorithmClient for RPC calls
-        - data: Input data dictionary with algorithm parameters
-        """
-        return master_simi(client, data, *args, **kwargs)
-

@@ -11,23 +11,36 @@ from typing import Dict, Any, List
 from scipy.linalg import cholesky, cho_solve
 from scipy.special import expit
 import json
+from vantage6.algorithm.tools.util import info, warn, error
 
-# Import vantage6 tools
-try:
-    from vantage6.algorithm.tools import AlgorithmClient
-    from vantage6.algorithm.tools.decorators import algorithm_client
-except ImportError:
-    print("Warning: vantage6 not installed. Using mock interface.")
-    class AlgorithmClient:
-        def __init__(self, *args, **kwargs):
-            pass
-        def get_data(self, *args, **kwargs):
-            return None
-        def create_new_task(self, *args, **kwargs):
-            return None
+# Import vantage6 tools (AlgorithmClient lives in vantage6.algorithm.client)
+from vantage6.algorithm.client import AlgorithmClient
+from vantage6.algorithm.tools.decorators import algorithm_client, data
 
 
-def RPC_simice_remote_initialize(*args, **kwargs) -> Dict[str, Any]:
+def _to_serializable(obj):
+    """Recursively convert numpy/pandas objects to JSON-serializable types."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, pd.DataFrame):
+        return obj.values.tolist()
+    if isinstance(obj, pd.Series):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+    return obj
+
+
+def _create_and_wait(client, input_, org_ids):
+    clean_input = _to_serializable(input_)
+    task = client.task.create(input_=clean_input, organizations=org_ids)
+    return client.wait_for_results(task_id=task.get("id"), interval=1)
+
+
+@data(1)
+def simice_remote_initialize(data: pd.DataFrame, mvar_list: List[int]) -> Dict[str, Any]:
     """
     Remote function to initialize SIMICE for multiple target columns.
     
@@ -40,21 +53,8 @@ def RPC_simice_remote_initialize(*args, **kwargs) -> Dict[str, Any]:
     --------
     dict with initialization status
     """
-    # Extract from kwargs (vantage6 passes everything via kwargs)
-    data = kwargs.get('data', {})
-    mvar_list = kwargs.get('mvar_list', [])
-    
-    if isinstance(data, dict):
-        dataset = data.get('data', data)
-    else:
-        dataset = data
-    
-    if isinstance(dataset, str):
-        D = pd.read_csv(dataset).values
-    elif isinstance(dataset, np.ndarray):
-        D = dataset
-    else:
-        raise ValueError("Data must be numpy array or CSV path")
+
+    D = data
     
     # Convert to 0-based
     mvar_py = [int(m) - 1 for m in mvar_list]
@@ -74,7 +74,8 @@ def RPC_simice_remote_initialize(*args, **kwargs) -> Dict[str, Any]:
     return {'status': 'initialized', 'n': D_aug.shape[0]}
 
 
-def RPC_simice_remote_statistics(*args, **kwargs) -> Dict[str, Any]:
+@data(1)
+def simice_remote_statistics(data: pd.DataFrame, mvar_list: List[int], beta_list: List[np.ndarray], method_list: List[str]) -> Dict[str, Any]:
     """
     Remote function to compute statistics for SIMICE iteration.
     
@@ -89,23 +90,8 @@ def RPC_simice_remote_statistics(*args, **kwargs) -> Dict[str, Any]:
     --------
     dict with aggregated statistics
     """
-    # Extract from kwargs (vantage6 passes everything via kwargs)
-    data = kwargs.get('data', {})
-    mvar_list = kwargs.get('mvar_list', [])
-    beta_list = kwargs.get('beta_list', [])
-    method_list = kwargs.get('method_list', [])
-    
-    if isinstance(data, dict):
-        dataset = data.get('data', data)
-    else:
-        dataset = data
-    
-    if isinstance(dataset, str):
-        D = pd.read_csv(dataset).values
-    elif isinstance(dataset, np.ndarray):
-        D = dataset
-    else:
-        raise ValueError("Data must be numpy array or CSV path")
+
+    D = data
     
     D_aug = np.column_stack([D.astype(float), np.ones((D.shape[0],), dtype=float)])
     mvar_py = [int(m) - 1 for m in mvar_list]
@@ -139,7 +125,7 @@ def RPC_simice_remote_statistics(*args, **kwargs) -> Dict[str, Any]:
     return results
 
 
-def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs) -> Dict[str, Any]:
+def master_simice(client: AlgorithmClient, data: Dict[str, Any], org_ids: List[int], *args, **kwargs) -> Dict[str, Any]:
     """
     Master function for SIMICE algorithm in vantage6.
     
@@ -164,11 +150,14 @@ def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs
     config = kwargs.copy()
     config.update(data if isinstance(data, dict) else {})
     
-    # Load central data
-    if isinstance(config.get('data'), str):
-        D = pd.read_csv(config['data']).values.astype(float)
-    elif isinstance(config.get('data'), np.ndarray):
-        D = config['data'].astype(float)
+    # Load central data: prefer config['data'], otherwise use positional data
+    dataset = config.get('data', data)
+    if isinstance(dataset, str):
+        D = pd.read_csv(dataset).values.astype(float)
+    elif isinstance(dataset, pd.DataFrame):
+        D = dataset.values.astype(float)
+    elif isinstance(dataset, np.ndarray):
+        D = dataset.astype(float)
     else:
         raise ValueError("Central data must be provided")
     
@@ -186,6 +175,7 @@ def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs
     # Initialize
     D_aug = np.column_stack([D, np.ones((D.shape[0],), dtype=float)])
     mvar_py = [int(m) - 1 for m in mvar_list_1b]
+    info(f"SIMICE master: targets={mvar_list_1b}, rows={D.shape[0]}")
     
     # Initialize missing values
     miss = np.isnan(D_aug)
@@ -197,19 +187,15 @@ def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs
             D_aug[mj, j] = mu
     
     # Initialize remote nodes
-    task_input = {
-        'data': config.get('data'),
-        'mvar_list': mvar_list_1b
-    }
+    task_input = {'mvar_list': mvar_list_1b}
     
-    init_results = client.create_new_task(
-        input_={
-            'method': 'simice_remote_initialize',
-            'args': [],
-            'kwargs': task_input
-        },
-        organization_ids=[]
+    info("SIMICE master: initializing remotes")
+    init_results = _create_and_wait(
+        client,
+        {'method': 'simice_remote_initialize', 'args': [], 'kwargs': task_input},
+        org_ids=org_ids
     )
+
     
     # Verify initialization
     if not init_results:
@@ -218,7 +204,7 @@ def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs
     # Iterations before first imputation
     beta_list = [np.zeros(D_aug.shape[1] - 1) for _ in mvar_py]
     for _ in range(iter0):
-        beta_list = _simice_iteration(client, D_aug, mvar_py, beta_list, method_list, config)
+        beta_list = _simice_iteration(client, D_aug, mvar_py, beta_list, method_list, config, org_ids)
     
     # Generate imputations
     imputed_datasets = []
@@ -227,7 +213,7 @@ def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs
         
         # Iterations between imputations
         for _ in range(iter_val):
-            beta_list = _simice_iteration(client, D_imputed, mvar_py, beta_list, method_list, config)
+            beta_list = _simice_iteration(client, D_imputed, mvar_py, beta_list, method_list, config, org_ids)
         
         # Impute missing values
         for idx, (j, method) in enumerate(zip(mvar_py, method_list)):
@@ -252,30 +238,33 @@ def master_simice(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs
     return {'imputed_datasets': imputed_datasets}
 
 
+
+
+
 def _simice_iteration(client: AlgorithmClient, D: np.ndarray, mvar_py: List[int],
-                     beta_list: List[np.ndarray], method_list: List[str], config: Dict) -> List[np.ndarray]:
+                     beta_list: List[np.ndarray], method_list: List[str], config: Dict, org_ids: List[int]) -> List[np.ndarray]:
     """Perform one iteration of SIMICE."""
     mvar_list_1b = [m + 1 for m in mvar_py]
     
-    # Request statistics from remotes
+    info(f"SIMICE iteration: dispatching stats for {len(mvar_py)} targets")
     task_input = {
-        'data': config.get('data'),
         'mvar_list': mvar_list_1b,
         'beta_list': [b.tolist() for b in beta_list],
         'method_list': method_list
     }
     
-    results = client.create_new_task(
-        input_={
-            'method': 'simice_remote_statistics',
-            'args': [],
-            'kwargs': task_input
-        },
-        organization_ids=[]
+    results = _create_and_wait(
+        client,
+        {'method': 'simice_remote_statistics',
+        'args': [],
+        'kwargs': task_input},
+        org_ids=org_ids
     )
+
+
     
     if not results:
-        print("Warning: No remote nodes responded to statistics request")
+        warn("SIMICE iteration: no remote nodes responded to statistics request")
         return beta_list  # Return unchanged if no remotes
     
     # Aggregate and update betas
@@ -293,14 +282,18 @@ def _simice_iteration(client: AlgorithmClient, D: np.ndarray, mvar_py: List[int]
                 remote_stats = result.get('result', {}).get(f'col_{idx}', {})
                 remote_XX = remote_stats.get('XX', [])
                 remote_Xy = remote_stats.get('Xy', [])
-                if remote_XX and len(remote_XX) > 0:
-                    XX += np.array(remote_XX)
-                if remote_Xy and len(remote_Xy) > 0:
-                    Xy += np.array(remote_Xy)
+                rXX = np.array(remote_XX)
+                rXy = np.array(remote_Xy)
+                if rXX.shape == XX.shape:
+                    XX += rXX
+                if rXy.shape == Xy.shape:
+                    Xy += rXy
             
             # Solve
             reg = 1e-6 * np.eye(XX.shape[0])
             beta = np.linalg.solve(XX + reg, Xy)
+            new_beta_list.append(beta)
+            continue  # Gaussian branch handled; go to next target
         else:  # logistic
             beta = beta_list[idx]
             xb = X @ beta
@@ -309,37 +302,25 @@ def _simice_iteration(client: AlgorithmClient, D: np.ndarray, mvar_py: List[int]
             H = (X.T * w) @ X
             g = X.T @ (y - pr)
             
-            # Aggregate remote statistics for logistic
             for result in results:
                 remote_stats = result.get('result', {}).get(f'col_{idx}', {})
                 remote_H = remote_stats.get('H', [])
                 remote_g = remote_stats.get('g', [])
-                if remote_H and len(remote_H) > 0:
-                    H += np.array(remote_H)
-                if remote_g and len(remote_g) > 0:
-                    g += np.array(remote_g)
+                rH = np.array(remote_H)
+                rg = np.array(remote_g)
+                if rH.shape == H.shape:
+                    H += rH
+                if rg.shape == g.shape:
+                    g += rg
             
             # Update
             try:
                 cH = cholesky(H, lower=True)
                 direction = cho_solve((cH, True), g)
-            except:
+            except Exception:
                 direction = np.dot(np.linalg.pinv(H), g)
             
             beta = beta + 0.1 * direction  # Simple step
-        
-        new_beta_list.append(beta)
+            new_beta_list.append(beta)
     
     return new_beta_list
-
-
-# Vantage6 entry point
-if __name__ == "__main__":
-    from vantage6.algorithm.tools import AlgorithmClient
-    from vantage6.algorithm.tools.decorators import algorithm_client
-    
-    @algorithm_client
-    def main(client: AlgorithmClient, data: Dict[str, Any], *args, **kwargs):
-        """Main entry point for vantage6."""
-        return master_simice(client, data, *args, **kwargs)
-

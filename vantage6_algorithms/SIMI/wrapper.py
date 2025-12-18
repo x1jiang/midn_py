@@ -11,45 +11,25 @@ import os
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-# Import algorithm functions
-from algorithm import master_simi, RPC_simi_remote_gaussian, RPC_simi_remote_logistic
+# Import algorithm functions (exposed so wrap_algorithm can find them)
+from algorithm import master_simi, simi_remote_gaussian, simi_remote_logistic
 
 # Import vantage6 tools
 try:
-    from vantage6.algorithm.tools import AlgorithmClient
-    from vantage6.algorithm.tools.decorators import algorithm_client
+    from vantage6.algorithm.client import AlgorithmClient
+    from vantage6.algorithm.tools.decorators import algorithm_client, data
+    from vantage6.algorithm.tools.util import info, warn, error
     
-    # Register the algorithm with vantage6
+    @data(1)
     @algorithm_client
-    def simi_wrapper(client: AlgorithmClient, data, *args, **kwargs):
-        """
-        Vantage6 wrapper for SIMI algorithm.
-        
-        This function is called by vantage6 when executing the algorithm.
-        It routes to the appropriate function based on the method name.
-        """
-        method = kwargs.get('method', 'master')
-        
-        if method == 'master':
-            # Execute master function
-            return master_simi(client, data, *args, **kwargs)
-        elif method == 'simi_remote_gaussian':
-            # Execute remote Gaussian function
-            return RPC_simi_remote_gaussian(data, *args, **kwargs)
-        elif method == 'simi_remote_logistic':
-            # Execute remote Logistic function
-            return RPC_simi_remote_logistic(data, *args, **kwargs)
-        else:
-            raise ValueError(f"Unknown method: {method}")
+    def master(client: AlgorithmClient, data, *args, **kwargs):
+        """Entry point for SIMI master."""
+        return master_simi(client, data, *args, **kwargs)
     
-    # Set as main entry point
-    if __name__ == "__main__":
-        simi_wrapper()
+    # No direct execution; vantage6's wrap_algorithm will invoke this entry point.
         
 except ImportError:
     # Fallback for local testing
     print("Warning: vantage6 not installed. This wrapper requires vantage6.")
     print("For local testing, use algorithm.py directly.")
     sys.exit(1)
-
-
